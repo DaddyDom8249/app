@@ -6,18 +6,22 @@ export const API = `${BACKEND_URL}/api`;
 const client = axios.create({ baseURL: API, timeout: 120000 });
 
 function projectContext(p) {
+  // Keep only lightweight metadata for text-generation calls.
+  // Full base64 image data is sent ONLY to /generate-scene-image (Gemini) on user click.
+  const lyrics = (p.lyrics || "").slice(0, 1200);
+  const notes = (p.notes || "").slice(0, 500);
   return {
-    title: p.title,
-    artist: p.artist || "",
-    lyrics: p.lyrics || "",
+    title: (p.title || "").slice(0, 120),
+    artist: (p.artist || "").slice(0, 80),
+    lyrics,
     style: p.style,
-    notes: p.notes || "",
+    notes,
     referencePhotos: (p.referencePhotos || []).map((r) => ({
       id: r.id,
       type: r.type,
-      description: r.description || "",
-      fileName: r.fileName || "",
-      // Do not send imageDataUrl for text generation (saves bandwidth)
+      description: (r.description || "").slice(0, 160),
+      fileName: (r.fileName || "").slice(0, 80),
+      // NO imageDataUrl for text generation.
     })),
   };
 }

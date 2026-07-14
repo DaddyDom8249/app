@@ -1,0 +1,54 @@
+{
+  "summary": "Iteration 4 verified budget-safe fallback behavior end-to-end. Backend: 10/10 pytest passed. All four text endpoints (world-report, world-assets, storyboard, scene-prompts) return HTTP 200 with _fallback:true / _fallback_reason:'budget_exceeded' / _fallback_message containing 'Claude generation was unavailable, so BeatVision used demo fallback generation.', with fully-shaped schema (world-report has exactly 7 seven_story_beats, storyboard has exactly 8 scenes with all required keys, scene-prompts contains prompts with final_polished_prompt/camera_angle/lighting/mood/negative_prompt). Latency in fallback path is fast (world-report 1.81s, world-assets 0.18s, storyboard 0.19s, scene-prompts 0.22s). None of the four text endpoints ever returned 5xx. /api/generate-scene-image correctly returns 502 (not 5xx unhandled) because Gemini shares the same over-budget EMERGENT_LLM_KEY — code path validated via backend traceback ('litellm.BadRequestError: Budget has been exceeded! Current cost: 1.066105'). Frontend: ProjectWorkflow renders the amber FallbackBanner (data-testid='fallback-world') with the exact required text and a working Retry button (data-testid='fallback-world-retry'); page load fires ZERO text-generation calls (no auto-trigger); World Report badge shows 'READY' not 'Missing' after fallback; Approve button (btn-approve-world) remains available so user can continue the workflow; NO 'IMAGE PROVIDER MISSING' chip appears in header. Verified outbound payload for /generate-world-report contains NO 'data:image' and NO 'base64,' — imageDataUrl is correctly stripped from text-endpoint payloads (224 bytes total for a project with a base64-attached ref photo).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/generate-scene-image",
+        "issue": "Returns 502 when EMERGENT_LLM_KEY budget is exhausted (Gemini shares the same key). Body is Cloudflare-styled HTML rather than JSON, so the frontend toast shows a large HTML snippet. Consider catching the LiteLLM Budget exception in generate_scene_image and returning a JSON 503 with a friendly message so the UI can render a proper 'Image provider unavailable — try again after budget top-up' error card. Not required for this iteration since spec permits scene-image to fail while text endpoints must degrade gracefully."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "ProjectWorkflow — FallbackBanner",
+        "issues": ["Retry Claude button styled with btn-gold looks like a primary CTA even though real Claude will fail again until budget is topped up. Consider a secondary/ghost style plus a subtle tooltip 'Only retry after budget is restored'. Not blocking."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_fallback_resilience.py",
+    "/app/backend/tests/test_beatvision_full_chain.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: In server.py generate_scene_image, wrap the Gemini call with the same _classify_llm_error pattern used for text endpoints and return a JSON 503 instead of the raw 502/HTML page — improves UX consistency and helps future E2E tests.",
+    "OPTIONAL: Top up EMERGENT_LLM_KEY (currently $1.066/$1.0) if a real happy-path demo with actual Claude+Gemini output is needed before shipping. All resilience & fallback behavior is verified — budget top-up is not required to close this iteration.",
+    "OPTIONAL: Style FallbackBanner Retry button as btn-ghost instead of btn-gold to visually signal it may re-fail."
+  ],
+  "critical_code_review_comments": [
+    "server.py _claude_json_safe (lines 155-171) — clean, deterministic fallback wrapper. asyncio.wait_for(timeout=55s) inside prevents Cloudflare 60s edge timeout. Reason classification via _classify_llm_error works for budget/timeout/rate_limit/network/unavailable (verified via live budget_exceeded response).",
+    "server.py generate_world_assets / generate_storyboard / generate_scene_prompts — each wraps asyncio.gather in wait_for(55s) and returns fb payload on ANY exception. Verified: none return 5xx even when Claude throws BudgetExceededError inside gather.",
+    "fallbacks.py storyboard_fallback — always produces exactly 8 scenes with all required keys (scene_number, timestamp_range, scene_title, description, camera_movement, color_emphasis, symbol, reference_photo_ids, visual_prompt). scene_prompts_fallback iterates over req.storyboard, so if storyboard payload is empty the prompts list will also be empty — frontend must ensure storyboard is populated before generating prompts (currently gated by storyboardApproved check — OK).",
+    "api.js projectContext (lines 8-27) — correctly omits imageDataUrl for text calls and applies trim limits (lyrics 1200 / notes 500 / description 160 / fileName 80). Verified via captured outbound request: 224 bytes total with a base64 ref photo project → no image data leaked.",
+    "ProjectWorkflow.jsx FallbackBanner — reads data._fallback and shows amber alert. Correctly guards on `if (!data || !data._fallback) return null;` so no false banner when Claude succeeded. Passes label from FALLBACK_REASON_LABELS map plus the raw _fallback_message. onRetry wires back to the same do<Stage> handler — verified click triggers /api/generate-world-report.",
+    "ProjectWorkflow.jsx effectiveRefIds (lines 264-271) — correct: null/undefined → suggestions; empty array → suggestions (per spec); populated array → override. Consistent with StoryboardSceneCard.isOverridden logic.",
+    "server.py generate_scene_image (line 490-492) — swallows all exceptions into HTTPException(502) which loses granularity. When LiteLLM raises BudgetExceededError the client gets a Cloudflare 502 HTML page (see error log). Consider catching e where 'budget' in str(e).lower() and returning a structured JSON 503 with retry hint."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_fallback_resilience.py (NEW)"
+  ],
+  "success_rate": {
+    "backend": "100% (10/10 pytest, including 4 text endpoints returning fallback 200s, 4 no-5xx guards, provider-status, scene-image graceful 502)",
+    "frontend": "100% of tested items (fallback banner renders, message correct, Retry works, no auto-generation, badge = READY not Missing, Approve unblocked, no false IMAGE PROVIDER MISSING chip, imageDataUrl not sent to text endpoints)"
+  },
+  "test_credentials": "None required — BeatVision MVP has no auth.",
+  "seed_data_creation": "test_fallback_resilience.py fixtures create TEST_-prefixed project 'TEST_Wolves in the Rain' with 2 tiny in-memory PNG data URLs (32x32) for reference photos. No server-side DB persistence. Frontend test seeds a project directly into localStorage under key 'beatvision.projects.v1' to bypass the New Project flow.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "1) Fallback resilience is fully verified. EMERGENT_LLM_KEY is currently $1.066/$1.0 (over budget) which is the EXPECTED test condition. 2) All four text endpoints degrade gracefully with _fallback flags and full schema — verified in test_fallback_resilience.py (fast <2s per call in fallback path). 3) The only Cloudflare-styled 502 remaining is /api/generate-scene-image because Gemini shares the same over-budget key — could be improved by classifying budget error and returning JSON 503. 4) UI FallbackBanner + Retry pattern is proven for the World Report stage; the same pattern is wired for World Assets / Storyboard / Scene Prompts (testids fallback-assets/-retry, fallback-storyboard/-retry, fallback-prompts/-retry) — those were not clickable in this iteration because the workflow gates them behind Approve chain, but code review confirms identical wiring. 5) If main agent wants to smoke-test those banners: seed a project with worldReportApproved=true + worldAssetsFallback={_fallback:true, ...} + styleBibleApproved... and navigate — the banner in section 3 will render.",
+  "rca_of_the_issue": "PRIMARY: The original bug ('LLM budget exceeded caused Visual World Report and downstream stages to fail/get stuck as Missing') is FIXED. Root cause was raw HTTPException propagation from _claude_json when LiteLLM raised BudgetExceededError; the frontend received an HTTP 500 and the section badge stayed 'Missing' with no user recourse. FIX (verified): (a) new _claude_json_safe wraps Claude calls in try/except + asyncio.wait_for(55s) and on ANY exception returns the deterministic fallback with _fallback flag; (b) the three concurrent endpoints (world-assets, storyboard, scene-prompts) mirror the same try/except around asyncio.gather; (c) frontend api.js strips imageDataUrl before sending to text endpoints (verified via outbound payload capture — 224 bytes for a ref-photo project); (d) FallbackBanner component reads _fallback and shows amber warning + Retry, badge computes 'READY' from truthy worldReport (fallback content included), so section never stays 'Missing'. RESIDUAL: /api/generate-scene-image still returns raw HTML 502 when Gemini is over budget — optional polish."
+}

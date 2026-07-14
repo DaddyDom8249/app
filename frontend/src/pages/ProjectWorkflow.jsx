@@ -23,9 +23,48 @@ import {
   Loader2,
   Sparkles,
   Wand2,
+  AlertTriangle,
 } from "lucide-react";
 
 // ----------- Helpers -----------
+const FALLBACK_REASON_LABELS = {
+  budget_exceeded: "LLM budget exceeded",
+  timeout: "LLM timed out",
+  rate_limited: "LLM rate limited",
+  network: "Network error reaching LLM",
+  unavailable: "LLM unavailable",
+};
+
+function FallbackBanner({ data, onRetry, testid }) {
+  if (!data || !data._fallback) return null;
+  const label = FALLBACK_REASON_LABELS[data._fallback_reason] || "LLM unavailable";
+  return (
+    <div
+      className="mb-4 p-4 border border-[#FDBA74]/40 bg-[#F97316]/5 flex flex-col md:flex-row md:items-center md:justify-between gap-3"
+      data-testid={testid || "fallback-banner"}
+    >
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="w-5 h-5 text-[#FDBA74] mt-0.5 shrink-0" strokeWidth={1.5} />
+        <div>
+          <div className="overline text-[#FDBA74] mb-1">Demo Fallback · {label}</div>
+          <div className="font-body text-sm text-neutral-300">
+            {data._fallback_message ||
+              "Claude generation was unavailable, so BeatVision used demo fallback generation."}
+          </div>
+        </div>
+      </div>
+      {onRetry && (
+        <button
+          className="btn-gold shrink-0"
+          onClick={onRetry}
+          data-testid={testid ? `${testid}-retry` : "fallback-retry"}
+        >
+          <RefreshCw className="w-3 h-3 inline mr-1" /> Retry Claude
+        </button>
+      )}
+    </div>
+  );
+}
 function Section({ num, title, badge, children, testid }) {
   return (
     <section className="bv-card p-6 md:p-8" data-testid={testid}>
@@ -160,15 +199,20 @@ export default function ProjectWorkflow() {
     setLoad("assets", true);
     try {
       const data = await generateWorldAssets(project);
+      const fb = data._fallback
+        ? { _fallback: true, _fallback_reason: data._fallback_reason, _fallback_message: data._fallback_message }
+        : null;
       persist({
         styleBible: data.world_style_bible,
         characterSheet: data.character_sheet,
         environmentSheet: data.environment_sheet,
+        worldAssetsFallback: fb,
         styleBibleApproved: false,
         characterSheetApproved: false,
         environmentSheetApproved: false,
       });
-      toast.success("World Assets generated");
+      if (fb) toast.warning("World Assets: demo fallback generated (Claude unavailable)");
+      else toast.success("World Assets generated");
     } catch (e) {
       toast.error(e.response?.data?.detail || e.message || "Failed to generate assets");
     } finally {
@@ -180,8 +224,12 @@ export default function ProjectWorkflow() {
     setLoad("story", true);
     try {
       const data = await generateStoryboard(project);
-      persist({ storyboardScenes: data.scenes, storyboardApproved: false });
-      toast.success("Storyboard generated (8 scenes)");
+      const fb = data._fallback
+        ? { _fallback: true, _fallback_reason: data._fallback_reason, _fallback_message: data._fallback_message }
+        : null;
+      persist({ storyboardScenes: data.scenes, storyboardFallback: fb, storyboardApproved: false });
+      if (fb) toast.warning("Storyboard: demo fallback generated (Claude unavailable)");
+      else toast.success("Storyboard generated (8 scenes)");
     } catch (e) {
       toast.error(e.response?.data?.detail || e.message || "Failed to generate storyboard");
     } finally {
@@ -200,8 +248,12 @@ export default function ProjectWorkflow() {
       }));
       const patchedProject = { ...project, storyboardScenes: effectiveStoryboard };
       const data = await generateScenePrompts(patchedProject);
-      persist({ scenePrompts: data.prompts, scenePromptsApproved: false });
-      toast.success("Scene prompts generated");
+      const fb = data._fallback
+        ? { _fallback: true, _fallback_reason: data._fallback_reason, _fallback_message: data._fallback_message }
+        : null;
+      persist({ scenePrompts: data.prompts, scenePromptsFallback: fb, scenePromptsApproved: false });
+      if (fb) toast.warning("Scene Prompts: demo fallback generated (Claude unavailable)");
+      else toast.success("Scene prompts generated");
     } catch (e) {
       toast.error(e.response?.data?.detail || e.message || "Failed to generate scene prompts");
     } finally {
@@ -371,6 +423,7 @@ export default function ProjectWorkflow() {
         </div>
         {project.worldReport ? (
           <div className="bg-black/40 border border-white/5 p-5">
+            <FallbackBanner data={project.worldReport} onRetry={doWorldReport} testid="fallback-world" />
             <FieldRow label="Logline" value={project.worldReport.logline} />
             <FieldRow label="Mood" value={project.worldReport.mood} />
             <FieldRow label="Visual World Setting" value={project.worldReport.visual_world_setting} />
@@ -419,10 +472,12 @@ export default function ProjectWorkflow() {
               </button>
             </div>
             {project.styleBible && (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <AssetCard
-                  title="World Style Bible"
-                  data={project.styleBible}
+              <>
+                <FallbackBanner data={project.worldAssetsFallback} onRetry={doWorldAssets} testid="fallback-assets" />
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <AssetCard
+                    title="World Style Bible"
+                    data={project.styleBible}
                   approved={project.styleBibleApproved}
                   onApprove={() => persist({ styleBibleApproved: !project.styleBibleApproved })}
                   testid="asset-style"
@@ -442,6 +497,7 @@ export default function ProjectWorkflow() {
                   testid="asset-environment"
                 />
               </div>
+              </>
             )}
           </>
         )}
@@ -481,20 +537,23 @@ export default function ProjectWorkflow() {
               )}
             </div>
             {project.storyboardScenes && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {project.storyboardScenes.map((s, i) => (
-                  <StoryboardSceneCard
-                    key={i}
-                    scene={s}
-                    referencePhotos={project.referencePhotos || []}
-                    onUpdateOverrides={(refIds) => {
-                      const scenes = [...project.storyboardScenes];
-                      scenes[i] = { ...scenes[i], reference_photo_overrides: refIds };
-                      persist({ storyboardScenes: scenes });
-                    }}
-                  />
-                ))}
-              </div>
+              <>
+                <FallbackBanner data={project.storyboardFallback} onRetry={doStoryboard} testid="fallback-storyboard" />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {project.storyboardScenes.map((s, i) => (
+                    <StoryboardSceneCard
+                      key={i}
+                      scene={s}
+                      referencePhotos={project.referencePhotos || []}
+                      onUpdateOverrides={(refIds) => {
+                        const scenes = [...project.storyboardScenes];
+                        scenes[i] = { ...scenes[i], reference_photo_overrides: refIds };
+                        persist({ storyboardScenes: scenes });
+                      }}
+                    />
+                  ))}
+                </div>
+              </>
             )}
           </>
         )}
@@ -534,11 +593,13 @@ export default function ProjectWorkflow() {
               )}
             </div>
             {project.scenePrompts && (
-              <div className="space-y-3">
-                {project.scenePrompts.map((p, i) => (
-                  <ScenePromptCard
-                    key={i}
-                    p={p}
+              <>
+                <FallbackBanner data={project.scenePromptsFallback} onRetry={doScenePrompts} testid="fallback-prompts" />
+                <div className="space-y-3">
+                  {project.scenePrompts.map((p, i) => (
+                    <ScenePromptCard
+                      key={i}
+                      p={p}
                     onEdit={(next) => {
                       const clone = [...project.scenePrompts];
                       clone[i] = next;
@@ -546,7 +607,8 @@ export default function ProjectWorkflow() {
                     }}
                   />
                 ))}
-              </div>
+                </div>
+              </>
             )}
           </>
         )}

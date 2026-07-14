@@ -14,6 +14,8 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+
+import fallbacks as fb
 from json_repair import repair_json
 
 ROOT_DIR = Path(__file__).parent
@@ -119,14 +121,14 @@ def _extract_json(raw: str) -> dict:
     raise ValueError("No JSON object found in model response")
 
 
-async def _claude_json(system: str, user_text: str, session_id: str) -> dict:
+async def _claude_json(system: str, user_text: str, session_id: str, max_tokens: int = 4096) -> dict:
     if not EMERGENT_LLM_KEY:
         raise HTTPException(status_code=500, detail="EMERGENT_LLM_KEY not configured on server.")
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=session_id,
         system_message=system,
-    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=4096)
+    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=max_tokens)
     msg = UserMessage(text=user_text)
     response = await chat.send_message(msg)
     text = response if isinstance(response, str) else str(response)
@@ -135,6 +137,38 @@ async def _claude_json(system: str, user_text: str, session_id: str) -> dict:
     except Exception as e:
         logger.error(f"Failed to parse Claude JSON: {e}. Raw first 300: {text[:300]}")
         raise HTTPException(status_code=502, detail="Model returned invalid JSON. Please regenerate.")
+
+
+def _classify_llm_error(exc: Exception) -> str:
+    s = str(exc).lower()
+    if "budget" in s and "exceed" in s:
+        return "budget_exceeded"
+    if "timeout" in s or isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    if "rate limit" in s or "429" in s:
+        return "rate_limited"
+    if "connection" in s or "network" in s:
+        return "network"
+    return "unavailable"
+
+
+async def _claude_json_safe(system: str, user_text: str, session_id: str, fallback_fn, max_tokens: int = 4096, timeout: float = 55.0):
+    """Try Claude; on ANY failure return the deterministic fallback with _fallback flags."""
+    try:
+        return await asyncio.wait_for(
+            _claude_json(system, user_text, session_id, max_tokens=max_tokens),
+            timeout=timeout,
+        )
+    except Exception as e:
+        reason = _classify_llm_error(e)
+        logger.warning(f"Claude call {session_id} failed ({reason}): {str(e)[:200]} — using fallback.")
+        fb = fallback_fn()
+        fb["_fallback"] = True
+        fb["_fallback_reason"] = reason
+        fb["_fallback_message"] = (
+            "Claude generation was unavailable, so BeatVision used demo fallback generation."
+        )
+        return fb
 
 
 # ------------------------------------------------------------
@@ -173,26 +207,25 @@ async def provider_status():
 @api_router.post("/generate-world-report")
 async def generate_world_report(req: WorldReportRequest):
     photos_txt = _summarize_photos(req.referencePhotos)
+    lyrics = (req.lyrics or "").strip()[:1000]
+    notes = (req.notes or "").strip()[:400]
     system = (
-        "You are BeatVision — an award-winning music video creative director. "
-        "Return ONLY a JSON object matching the requested schema. No prose outside JSON."
+        "You are BeatVision — a music video creative director. Return ONLY JSON. Be concise: "
+        "each string < 40 words unless noted. seven_story_beats has exactly 7 items."
     )
-    user = f"""Song title: {req.title}
-Artist: {req.artist or 'Unknown'}
-Style preset: {req.style}
-Creator notes: {req.notes or '(none)'}
-Uploaded reference photos:
+    user = f"""Song: {req.title} | Artist: {req.artist or 'Unknown'} | Style: {req.style}
+Notes: {notes or '(none)'}
+Reference photos (metadata only):
 {photos_txt}
+Lyrics excerpt:
+{lyrics or '(none — infer emotion from title + style)'}
 
-Lyrics:
-{req.lyrics or '(none provided — infer emotion from title + style)'}
-
-Return this JSON schema:
+Return ONLY this JSON:
 {{
   "song_title": string,
   "artist": string,
   "selected_style": string,
-  "reference_photos_used": [string],           // brief summary per photo used
+  "reference_photos_used": [string],
   "core_emotional_themes": [string],
   "mood": string,
   "logline": string,
@@ -202,26 +235,28 @@ Return this JSON schema:
   "color_palette": [string],
   "symbols": [string],
   "camera_language": string,
-  "seven_story_beats": [                        // exactly 7 items
-    {{"beat": int, "title": string, "description": string}}
-  ],
+  "seven_story_beats": [{{"beat": int, "title": string, "description": string}}],
   "ai_visual_direction_prompt": string,
   "creator_memory_style_note": string,
-  "reference_photo_influence": string,          // how uploaded photos shape the direction
+  "reference_photo_influence": string,
   "approval_questions": [string]
 }}"""
-    data = await _claude_json(system, user, f"world-report-{uuid.uuid4()}")
-    return data
+    return await _claude_json_safe(
+        system, user, f"world-report-{uuid.uuid4()}",
+        fallback_fn=lambda: fb.world_report_fallback(req),
+        max_tokens=2800,
+        timeout=55.0,
+    )
 
 
 @api_router.post("/generate-world-assets")
 async def generate_world_assets(req: WorldAssetsRequest):
-    """Split into 3 concurrent Claude calls to stay under Cloudflare's ~60s ingress timeout."""
+    """Split into 3 concurrent Claude calls. On any failure, fall back to deterministic assets."""
     photos_txt = _summarize_photos(req.referencePhotos)
-    world_ctx = json.dumps(req.worldReport)[:2500]
-    header = f"Song: {req.title} by {req.artist or 'Unknown'} | Style: {req.style}\nReference photos:\n{photos_txt}\n\nApproved World Report:\n{world_ctx}\n\n"
+    world_ctx = json.dumps(req.worldReport)[:1600]
+    header = f"Song: {req.title} by {req.artist or 'Unknown'} | Style: {req.style}\nReference photos (metadata only):\n{photos_txt}\n\nApproved World Report (summary):\n{world_ctx}\n\n"
 
-    style_prompt = header + """Return ONLY this JSON:
+    style_prompt = header + """Return ONLY this JSON. Keep values concise (<25 words each):
 {
   "overall_look": string,
   "lighting": string,
@@ -232,7 +267,7 @@ async def generate_world_assets(req: WorldAssetsRequest):
   "reference_photo_usage_rules": string,
   "what_to_avoid": string
 }"""
-    character_prompt = header + """Return ONLY this JSON for the main character sheet:
+    character_prompt = header + """Return ONLY this JSON for the main character sheet (<25 words each):
 {
   "name_role": string,
   "appearance": string,
@@ -242,7 +277,7 @@ async def generate_world_assets(req: WorldAssetsRequest):
   "consistency_rules": string,
   "character_reference_photo_notes": string
 }"""
-    environment_prompt = header + """Return ONLY this JSON for the environment sheet:
+    environment_prompt = header + """Return ONLY this JSON for the environment sheet (<25 words each):
 {
   "main_location": string,
   "atmosphere": string,
@@ -258,19 +293,25 @@ async def generate_world_assets(req: WorldAssetsRequest):
     try:
         style, character, environment = await asyncio.wait_for(
             asyncio.gather(
-                _claude_json(system, style_prompt, f"world-assets-style-{sid}"),
-                _claude_json(system, character_prompt, f"world-assets-char-{sid}"),
-                _claude_json(system, environment_prompt, f"world-assets-env-{sid}"),
+                _claude_json(system, style_prompt, f"world-assets-style-{sid}", max_tokens=1600),
+                _claude_json(system, character_prompt, f"world-assets-char-{sid}", max_tokens=1200),
+                _claude_json(system, environment_prompt, f"world-assets-env-{sid}", max_tokens=1400),
             ),
             timeout=55.0,
         )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="World assets generation timed out. Please retry.")
-    return {
-        "world_style_bible": style,
-        "character_sheet": character,
-        "environment_sheet": environment,
-    }
+        return {
+            "world_style_bible": style,
+            "character_sheet": character,
+            "environment_sheet": environment,
+        }
+    except Exception as e:
+        reason = _classify_llm_error(e)
+        logger.warning(f"world-assets failed ({reason}): {str(e)[:200]} — using fallback")
+        payload = fb.world_assets_fallback(req)
+        payload["_fallback"] = True
+        payload["_fallback_reason"] = reason
+        payload["_fallback_message"] = "Claude generation was unavailable, so BeatVision used demo fallback generation."
+        return payload
 
 
 @api_router.post("/generate-storyboard")
@@ -315,17 +356,22 @@ Environment Sheet summary: {json.dumps(req.environmentSheet)[:600]}
     try:
         part1, part2 = await asyncio.wait_for(
             asyncio.gather(
-                _claude_json(system, p1, f"storyboard-a-{sid}"),
-                _claude_json(system, p2, f"storyboard-b-{sid}"),
+                _claude_json(system, p1, f"storyboard-a-{sid}", max_tokens=2400),
+                _claude_json(system, p2, f"storyboard-b-{sid}", max_tokens=2400),
             ),
             timeout=55.0,
         )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Storyboard generation timed out. Please retry.")
-    scenes = (part1.get("scenes") or []) + (part2.get("scenes") or [])
-    # ensure sorted 1..8
-    scenes.sort(key=lambda s: s.get("scene_number", 0))
-    return {"scenes": scenes}
+        scenes = (part1.get("scenes") or []) + (part2.get("scenes") or [])
+        scenes.sort(key=lambda s: s.get("scene_number", 0))
+        return {"scenes": scenes}
+    except Exception as e:
+        reason = _classify_llm_error(e)
+        logger.warning(f"storyboard failed ({reason}): {str(e)[:200]} — using fallback")
+        payload = fb.storyboard_fallback(req)
+        payload["_fallback"] = True
+        payload["_fallback_reason"] = reason
+        payload["_fallback_message"] = "Claude generation was unavailable, so BeatVision used demo fallback generation."
+        return payload
 
 
 @api_router.post("/generate-scene-prompts")
@@ -373,11 +419,11 @@ Environment Sheet: {json.dumps(req.environmentSheet)[:500]}
     async def one_chunk(chunk_scenes, label, tag):
         prompt = (
             header
-            + f"Storyboard scenes {label}: {json.dumps(chunk_scenes)[:1600]}\n\n"
+            + f"Storyboard scenes {label}: {json.dumps(chunk_scenes)[:1200]}\n\n"
             + schema
             + f"Return EXACTLY 2 prompts for scene_number {label}."
         )
-        return await _claude_json(system, prompt, tag)
+        return await _claude_json(system, prompt, tag, max_tokens=1800)
 
     sid = uuid.uuid4()
     try:
@@ -387,14 +433,19 @@ Environment Sheet: {json.dumps(req.environmentSheet)[:500]}
             ),
             timeout=55.0,
         )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Scene prompt generation timed out. Please retry.")
-
-    prompts = []
-    for part in parts:
-        prompts.extend(part.get("prompts") or [])
-    prompts.sort(key=lambda p: p.get("scene_number", 0))
-    return {"prompts": prompts}
+        prompts = []
+        for part in parts:
+            prompts.extend(part.get("prompts") or [])
+        prompts.sort(key=lambda p: p.get("scene_number", 0))
+        return {"prompts": prompts}
+    except Exception as e:
+        reason = _classify_llm_error(e)
+        logger.warning(f"scene-prompts failed ({reason}): {str(e)[:200]} — using fallback")
+        payload = fb.scene_prompts_fallback(req)
+        payload["_fallback"] = True
+        payload["_fallback_reason"] = reason
+        payload["_fallback_message"] = "Claude generation was unavailable, so BeatVision used demo fallback generation."
+        return payload
 
 
 @api_router.post("/generate-scene-image")

@@ -58,10 +58,13 @@ export function newProject(fields) {
     characterSheetApproved: false,
     environmentSheet: null,
     environmentSheetApproved: false,
+    worldAssetsFallback: null,
     storyboardScenes: null,
     storyboardApproved: false,
+    storyboardFallback: null,
     scenePrompts: null,
     scenePromptsApproved: false,
+    scenePromptsFallback: null,
     sceneImages: {}, // sceneNumber -> { imageDataUrl, sourceType, approved, providerName, generatedAt, referencePhotoIdsUsed }
     motionPlan: null,
     createdAt: null,
