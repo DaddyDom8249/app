@@ -255,11 +255,17 @@ async def generate_world_assets(req: WorldAssetsRequest):
 }"""
     system = "You are BeatVision. Return ONLY the requested JSON object. No prose."
     sid = uuid.uuid4()
-    style, character, environment = await asyncio.gather(
-        _claude_json(system, style_prompt, f"world-assets-style-{sid}"),
-        _claude_json(system, character_prompt, f"world-assets-char-{sid}"),
-        _claude_json(system, environment_prompt, f"world-assets-env-{sid}"),
-    )
+    try:
+        style, character, environment = await asyncio.wait_for(
+            asyncio.gather(
+                _claude_json(system, style_prompt, f"world-assets-style-{sid}"),
+                _claude_json(system, character_prompt, f"world-assets-char-{sid}"),
+                _claude_json(system, environment_prompt, f"world-assets-env-{sid}"),
+            ),
+            timeout=55.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="World assets generation timed out. Please retry.")
     return {
         "world_style_bible": style,
         "character_sheet": character,
@@ -306,10 +312,16 @@ Environment Sheet summary: {json.dumps(req.environmentSheet)[:600]}
     p2 = header + schema + "Provide EXACTLY 4 scenes with scene_number 5,6,7,8 (climax + resolution). Continue the narrative arc."
 
     sid = uuid.uuid4()
-    part1, part2 = await asyncio.gather(
-        _claude_json(system, p1, f"storyboard-a-{sid}"),
-        _claude_json(system, p2, f"storyboard-b-{sid}"),
-    )
+    try:
+        part1, part2 = await asyncio.wait_for(
+            asyncio.gather(
+                _claude_json(system, p1, f"storyboard-a-{sid}"),
+                _claude_json(system, p2, f"storyboard-b-{sid}"),
+            ),
+            timeout=55.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Storyboard generation timed out. Please retry.")
     scenes = (part1.get("scenes") or []) + (part2.get("scenes") or [])
     # ensure sorted 1..8
     scenes.sort(key=lambda s: s.get("scene_number", 0))
@@ -318,15 +330,15 @@ Environment Sheet summary: {json.dumps(req.environmentSheet)[:600]}
 
 @api_router.post("/generate-scene-prompts")
 async def generate_scene_prompts(req: ScenePromptsRequest):
-    """Split into 2 concurrent calls: prompts 1-4 and 5-8."""
+    """Split into 4 concurrent calls (2 prompts each) to keep each sub-call well under the 60s ingress budget."""
     photos_txt = _summarize_photos(req.referencePhotos)
     header = f"""Song: {req.title} | Style: {req.style}
 Reference photos:
 {photos_txt}
 
-Style Bible: {json.dumps(req.styleBible)[:1000]}
-Character Sheet: {json.dumps(req.characterSheet)[:700]}
-Environment Sheet: {json.dumps(req.environmentSheet)[:700]}
+Style Bible: {json.dumps(req.styleBible)[:800]}
+Character Sheet: {json.dumps(req.characterSheet)[:500]}
+Environment Sheet: {json.dumps(req.environmentSheet)[:500]}
 """
     schema = """Return ONLY this JSON:
 {
@@ -347,18 +359,40 @@ Environment Sheet: {json.dumps(req.environmentSheet)[:700]}
   ]
 }
 """
-    system = "You are BeatVision. Return ONLY the requested JSON. No prose."
-    sb_first = [s for s in (req.storyboard or []) if s.get("scene_number", 0) <= 4]
-    sb_second = [s for s in (req.storyboard or []) if s.get("scene_number", 0) >= 5]
-    p1 = header + f"Storyboard scenes 1-4: {json.dumps(sb_first)[:2500]}\n\n" + schema + "Return EXACTLY 4 prompts for scene_number 1,2,3,4."
-    p2 = header + f"Storyboard scenes 5-8: {json.dumps(sb_second)[:2500]}\n\n" + schema + "Return EXACTLY 4 prompts for scene_number 5,6,7,8."
+    system = "You are BeatVision. Return ONLY the requested JSON. No prose. Keep string values concise (< 30 words each) except final_polished_prompt (< 80 words)."
+
+    scenes = req.storyboard or []
+    chunks = [
+        [s for s in scenes if s.get("scene_number", 0) in (1, 2)],
+        [s for s in scenes if s.get("scene_number", 0) in (3, 4)],
+        [s for s in scenes if s.get("scene_number", 0) in (5, 6)],
+        [s for s in scenes if s.get("scene_number", 0) in (7, 8)],
+    ]
+    chunk_labels = ["1,2", "3,4", "5,6", "7,8"]
+
+    async def one_chunk(chunk_scenes, label, tag):
+        prompt = (
+            header
+            + f"Storyboard scenes {label}: {json.dumps(chunk_scenes)[:1600]}\n\n"
+            + schema
+            + f"Return EXACTLY 2 prompts for scene_number {label}."
+        )
+        return await _claude_json(system, prompt, tag)
 
     sid = uuid.uuid4()
-    part1, part2 = await asyncio.gather(
-        _claude_json(system, p1, f"scene-prompts-a-{sid}"),
-        _claude_json(system, p2, f"scene-prompts-b-{sid}"),
-    )
-    prompts = (part1.get("prompts") or []) + (part2.get("prompts") or [])
+    try:
+        parts = await asyncio.wait_for(
+            asyncio.gather(
+                *[one_chunk(chunks[i], chunk_labels[i], f"scene-prompts-{i}-{sid}") for i in range(4)]
+            ),
+            timeout=55.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Scene prompt generation timed out. Please retry.")
+
+    prompts = []
+    for part in parts:
+        prompts.extend(part.get("prompts") or [])
     prompts.sort(key=lambda p: p.get("scene_number", 0))
     return {"prompts": prompts}
 
