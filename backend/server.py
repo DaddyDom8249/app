@@ -488,7 +488,15 @@ Avoid: {req.negativePrompt or 'blur, low quality, watermark, distorted anatomy'}
         msg = UserMessage(text=prompt, file_contents=image_contents if image_contents else None)
         text, images = await chat.send_message_multimodal_response(msg)
     except Exception as e:
-        logger.exception("Image generation failed")
+        reason = _classify_llm_error(e)
+        logger.warning(f"Image generation failed ({reason}): {str(e)[:200]}")
+        if reason == "budget_exceeded":
+            raise HTTPException(
+                status_code=503,
+                detail="Image provider budget exhausted. Top up your Emergent LLM key and retry, or upload manually.",
+            )
+        if reason == "timeout":
+            raise HTTPException(status_code=504, detail="Image provider timed out. Please retry.")
         raise HTTPException(status_code=502, detail=f"Image provider error: {str(e)[:200]}")
 
     if not images:
