@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getProject, upsertProject, fileToDataUrl } from "@/lib/storage";
-import { styleLabel, refTypeLabel, MOTION_TYPES } from "@/lib/constants";
+import { styleLabel, refTypeLabel, REFERENCE_TYPES, MOTION_TYPES } from "@/lib/constants";
 import {
   generateWorldReport,
   generateWorldAssets,
@@ -192,7 +192,14 @@ export default function ProjectWorkflow() {
   async function doScenePrompts() {
     setLoad("prompts", true);
     try {
-      const data = await generateScenePrompts(project);
+      // Substitute effective ref ids (overrides or suggestions) into storyboard payload
+      // so the LLM's prompt reflects the user's chosen references.
+      const effectiveStoryboard = (project.storyboardScenes || []).map((s) => ({
+        ...s,
+        reference_photo_ids: effectiveRefIds(s),
+      }));
+      const patchedProject = { ...project, storyboardScenes: effectiveStoryboard };
+      const data = await generateScenePrompts(patchedProject);
       persist({ scenePrompts: data.prompts, scenePromptsApproved: false });
       toast.success("Scene prompts generated");
     } catch (e) {
@@ -200,6 +207,15 @@ export default function ProjectWorkflow() {
     } finally {
       setLoad("prompts", false);
     }
+  }
+
+  function effectiveRefIds(scene) {
+    if (!scene) return [];
+    const overrides = scene.reference_photo_overrides;
+    if (overrides && overrides.length > 0) return overrides;
+    if (overrides === null || overrides === undefined) return scene.reference_photo_ids || [];
+    // overrides === [] means user cleared to zero, still fall back to suggestions per spec
+    return scene.reference_photo_ids || [];
   }
 
   async function doGenerateSceneImage(sceneNumber) {
@@ -211,7 +227,7 @@ export default function ProjectWorkflow() {
     try {
       const scene = project.storyboardScenes.find((s) => s.scene_number === sceneNumber);
       const prompt = project.scenePrompts?.find((p) => p.scene_number === sceneNumber);
-      const refIds = scene?.reference_photo_ids || [];
+      const refIds = effectiveRefIds(scene);
       const refs = (project.referencePhotos || []).filter((r) => refIds.includes(r.id));
       const data = await generateSceneImage({
         projectId: project.id,
@@ -288,7 +304,7 @@ export default function ProjectWorkflow() {
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="badge badge-locked"><span className="badge-dot" />{styleLabel(project.style)}</span>
             <span className="badge badge-ref-active"><span className="badge-dot" />{(project.referencePhotos || []).length} References</span>
-            {!imageProviderReady && <StatusBadge status="provider_missing" label="Image Provider Missing" />}
+            {providerStatus && !imageProviderReady && <StatusBadge status="provider_missing" label="Image Provider Missing" />}
           </div>
         </div>
         <button className="btn-ghost" onClick={() => nav("/dashboard")} data-testid="workflow-back">
@@ -467,30 +483,16 @@ export default function ProjectWorkflow() {
             {project.storyboardScenes && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {project.storyboardScenes.map((s, i) => (
-                  <div key={i} className="bv-card p-5" data-testid={`storyboard-scene-${s.scene_number}`}>
-                    <div className="flex justify-between items-start mb-2">
-                      <div className="stage-num">S{String(s.scene_number).padStart(2, "0")}</div>
-                      <div className="overline text-neutral-500">{s.timestamp_range}</div>
-                    </div>
-                    <h4 className="font-display text-lg uppercase mt-2 mb-3">{s.scene_title}</h4>
-                    <p className="text-sm text-neutral-300 font-body mb-3">{s.description}</p>
-                    <div className="text-xs font-mono text-neutral-500 space-y-1">
-                      <div><span className="text-neutral-400">Camera:</span> {s.camera_movement}</div>
-                      <div><span className="text-neutral-400">Color:</span> {s.color_emphasis}</div>
-                      <div><span className="text-neutral-400">Symbol:</span> {s.symbol}</div>
-                    </div>
-                    {s.reference_photo_ids?.length > 0 && (
-                      <div className="mt-3 flex flex-wrap gap-1">
-                        {s.reference_photo_ids.map((rid) => {
-                          const ref = (project.referencePhotos || []).find((r) => r.id === rid);
-                          if (!ref) return null;
-                          return (
-                            <span key={rid} className="badge badge-ref-active"><span className="badge-dot" />{refTypeLabel(ref.type)}</span>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                  <StoryboardSceneCard
+                    key={i}
+                    scene={s}
+                    referencePhotos={project.referencePhotos || []}
+                    onUpdateOverrides={(refIds) => {
+                      const scenes = [...project.storyboardScenes];
+                      scenes[i] = { ...scenes[i], reference_photo_overrides: refIds };
+                      persist({ storyboardScenes: scenes });
+                    }}
+                  />
                 ))}
               </div>
             )}
@@ -567,7 +569,7 @@ export default function ProjectWorkflow() {
           </div>
         ) : (
           <>
-            {!imageProviderReady && (
+            {providerStatus && !imageProviderReady && (
               <div className="mb-5 bv-card p-4 border-orange-500/30">
                 <div className="flex items-center gap-2">
                   <StatusBadge status="provider_missing" />
@@ -579,21 +581,27 @@ export default function ProjectWorkflow() {
               </div>
             )}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {(project.storyboardScenes || []).map((s) => (
-                <SceneImageCard
-                  key={s.scene_number}
-                  scene={s}
-                  prompt={project.scenePrompts?.find((sp) => sp.scene_number === s.scene_number)}
-                  image={project.sceneImages?.[s.scene_number]}
-                  imageProviderReady={imageProviderReady}
-                  loading={!!loading[`img-${s.scene_number}`]}
-                  onGenerate={() => doGenerateSceneImage(s.scene_number)}
-                  onUpload={(file) => handleManualUpload(s.scene_number, file)}
-                  onApprove={() => approveSceneImage(s.scene_number, true)}
-                  onUnapprove={() => approveSceneImage(s.scene_number, false)}
-                  onRemove={() => removeSceneImage(s.scene_number)}
-                />
-              ))}
+              {(project.storyboardScenes || []).map((s) => {
+                const activeRefIds = effectiveRefIds(s);
+                const activeRefs = (project.referencePhotos || []).filter((r) => activeRefIds.includes(r.id));
+                return (
+                  <SceneImageCard
+                    key={s.scene_number}
+                    scene={s}
+                    prompt={project.scenePrompts?.find((sp) => sp.scene_number === s.scene_number)}
+                    image={project.sceneImages?.[s.scene_number]}
+                    imageProviderReady={imageProviderReady}
+                    activeRefs={activeRefs}
+                    isOverridden={!!(s.reference_photo_overrides && s.reference_photo_overrides.length > 0)}
+                    loading={!!loading[`img-${s.scene_number}`]}
+                    onGenerate={() => doGenerateSceneImage(s.scene_number)}
+                    onUpload={(file) => handleManualUpload(s.scene_number, file)}
+                    onApprove={() => approveSceneImage(s.scene_number, true)}
+                    onUnapprove={() => approveSceneImage(s.scene_number, false)}
+                    onRemove={() => removeSceneImage(s.scene_number)}
+                  />
+                );
+              })}
             </div>
           </>
         )}
@@ -622,6 +630,174 @@ export default function ProjectWorkflow() {
     </div>
   );
 }
+
+function StoryboardSceneCard({ scene, referencePhotos, onUpdateOverrides }) {
+  const [editing, setEditing] = useState(false);
+  const suggestedIds = scene.reference_photo_ids || [];
+  const overrideIds = scene.reference_photo_overrides || null; // null = use suggestions
+  const activeIds = overrideIds && overrideIds.length > 0 ? overrideIds : suggestedIds;
+  const isOverridden = overrideIds !== null;
+
+  function toggle(id) {
+    const base = overrideIds ?? [...suggestedIds];
+    const next = base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
+    onUpdateOverrides(next);
+  }
+
+  function clearOverride() {
+    onUpdateOverrides(null);
+  }
+
+  // Group ref photos by type
+  const byType = referencePhotos.reduce((acc, r) => {
+    (acc[r.type] = acc[r.type] || []).push(r);
+    return acc;
+  }, {});
+
+  return (
+    <div className="bv-card p-5" data-testid={`storyboard-scene-${scene.scene_number}`}>
+      <div className="flex justify-between items-start mb-2">
+        <div className="stage-num">S{String(scene.scene_number).padStart(2, "0")}</div>
+        <div className="overline text-neutral-500">{scene.timestamp_range}</div>
+      </div>
+      <h4 className="font-display text-lg uppercase mt-2 mb-3">{scene.scene_title}</h4>
+      <p className="text-sm text-neutral-300 font-body mb-3">{scene.description}</p>
+      <div className="text-xs font-mono text-neutral-500 space-y-1">
+        <div><span className="text-neutral-400">Camera:</span> {scene.camera_movement}</div>
+        <div><span className="text-neutral-400">Color:</span> {scene.color_emphasis}</div>
+        <div><span className="text-neutral-400">Symbol:</span> {scene.symbol}</div>
+      </div>
+
+      {/* Suggested references (read-only pills) */}
+      {suggestedIds.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-white/5">
+          <div className="overline text-neutral-500 mb-2">Suggested by Storyboard</div>
+          <div className="flex flex-wrap gap-1">
+            {suggestedIds.map((rid) => {
+              const ref = referencePhotos.find((r) => r.id === rid);
+              if (!ref) return null;
+              return (
+                <span
+                  key={rid}
+                  className="badge badge-locked"
+                  data-testid={`storyboard-suggested-${scene.scene_number}-${rid}`}
+                >
+                  <span className="badge-dot" />{refTypeLabel(ref.type)}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Override control */}
+      <div className="mt-4 pt-3 border-t border-white/5">
+        <div className="flex items-center justify-between mb-2">
+          <div className="overline text-neutral-500">
+            {isOverridden ? "Your Override (Active)" : "Manual Override"}
+          </div>
+          <div className="flex gap-2">
+            {isOverridden && (
+              <button
+                className="btn-ghost !py-1 !px-2 !text-[0.65rem]"
+                onClick={clearOverride}
+                data-testid={`storyboard-refs-clear-${scene.scene_number}`}
+              >
+                Reset
+              </button>
+            )}
+            {referencePhotos.length > 0 && (
+              <button
+                className="btn-ghost !py-1 !px-2 !text-[0.65rem]"
+                onClick={() => setEditing((e) => !e)}
+                data-testid={`storyboard-refs-edit-${scene.scene_number}`}
+              >
+                {editing ? "Done" : "Edit"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Active reference pills */}
+        {!editing && (
+          activeIds.length === 0 ? (
+            <div className="text-xs text-neutral-500 font-body">
+              {referencePhotos.length === 0
+                ? "No reference photos uploaded in Stage 01."
+                : "No references active for this scene. Falls back to suggestions if any."}
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {activeIds.map((rid) => {
+                const ref = referencePhotos.find((r) => r.id === rid);
+                if (!ref) return null;
+                return (
+                  <span
+                    key={rid}
+                    className="badge badge-ref-active"
+                    data-testid={`storyboard-active-${scene.scene_number}-${rid}`}
+                  >
+                    <span className="badge-dot" />{refTypeLabel(ref.type)}
+                  </span>
+                );
+              })}
+            </div>
+          )
+        )}
+
+        {editing && (
+          <div
+            className="space-y-3 max-h-72 overflow-auto pr-1 mt-1"
+            data-testid={`storyboard-refs-editor-${scene.scene_number}`}
+          >
+            {referencePhotos.length === 0 ? (
+              <div className="text-xs text-neutral-500 font-body">
+                Upload reference photos in Stage 01 to override per-scene.
+              </div>
+            ) : (
+              REFERENCE_TYPES.filter((t) => byType[t.id]?.length).map((t) => (
+                <div key={t.id}>
+                  <div className="overline text-neutral-500 mb-1">{t.label}</div>
+                  <div className="space-y-1">
+                    {byType[t.id].map((ref) => {
+                      const on = (overrideIds ?? suggestedIds).includes(ref.id);
+                      return (
+                        <label
+                          key={ref.id}
+                          className={`flex items-center gap-3 p-2 border cursor-pointer transition-colors ${
+                            on ? "border-[#8B5CF6]/70 bg-[#8B5CF6]/5" : "border-white/10 hover:border-white/25"
+                          }`}
+                          data-testid={`storyboard-ref-toggle-${scene.scene_number}-${ref.id}`}
+                        >
+                          <input
+                            type="checkbox"
+                            className="accent-[#E5B83B]"
+                            checked={on}
+                            onChange={() => toggle(ref.id)}
+                          />
+                          {ref.imageDataUrl && (
+                            <img src={ref.imageDataUrl} alt={ref.fileName} className="w-10 h-10 object-cover" />
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs text-neutral-500 truncate font-body">
+                              {ref.description || ref.fileName || "—"}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 
 // ---------- Sub-components ----------
 function AssetCard({ title, data, approved, onApprove, testid }) {
@@ -704,7 +880,7 @@ function ScenePromptCard({ p, onEdit }) {
   );
 }
 
-function SceneImageCard({ scene, prompt, image, imageProviderReady, loading, onGenerate, onUpload, onApprove, onUnapprove, onRemove }) {
+function SceneImageCard({ scene, prompt, image, imageProviderReady, activeRefs, isOverridden, loading, onGenerate, onUpload, onApprove, onUnapprove, onRemove }) {
   const inputRef = useRef(null);
   return (
     <div className="bv-card p-4" data-testid={`scene-img-card-${scene.scene_number}`}>
@@ -722,6 +898,35 @@ function SceneImageCard({ scene, prompt, image, imageProviderReady, loading, onG
           <ImageIcon className="w-8 h-8 text-neutral-700" strokeWidth={1.2} />
         )}
       </div>
+
+      {/* Active refs display */}
+      <div className="mb-3">
+        <div className="overline text-neutral-500 mb-1">
+          References {isOverridden ? "(Override)" : "(Suggested)"}
+        </div>
+        {activeRefs && activeRefs.length > 0 ? (
+          <div
+            className="flex flex-wrap gap-1"
+            data-testid={`scene-img-refs-${scene.scene_number}`}
+          >
+            {activeRefs.map((r) => (
+              <span
+                key={r.id}
+                className="badge badge-ref-active"
+                data-testid={`scene-img-ref-${scene.scene_number}-${r.id}`}
+                title={r.description || r.fileName}
+              >
+                <span className="badge-dot" />{refTypeLabel(r.type)}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-neutral-500 font-body">
+            No references — generation will use prompt only.
+          </div>
+        )}
+      </div>
+
       {image && (
         <div className="text-xs font-mono text-neutral-500 mb-3">
           <div><span className="text-neutral-400">Source:</span> {image.sourceType === "manual_upload" ? "Manual upload" : `Generated · ${image.providerName || "provider"}`}</div>

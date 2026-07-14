@@ -13,6 +13,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
+from json_repair import repair_json
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -93,19 +94,27 @@ def _summarize_photos(photos: List[ReferencePhotoPayload]) -> str:
 
 
 def _extract_json(raw: str) -> dict:
-    """Extract JSON from Claude's response even if wrapped in code fences or prose."""
+    """Extract JSON from Claude's response even if wrapped in code fences or prose.
+    Uses json_repair to tolerate unescaped newlines / trailing commas / minor malformations."""
+    def _parse(s: str) -> dict:
+        try:
+            return json.loads(s)
+        except Exception:
+            repaired = repair_json(s, return_objects=False)
+            return json.loads(repaired)
+
     # try fenced ```json ... ```
     m = re.search(r"```json\s*(\{.*?\})\s*```", raw, re.DOTALL)
     if m:
-        return json.loads(m.group(1))
+        return _parse(m.group(1))
     m = re.search(r"```\s*(\{.*?\})\s*```", raw, re.DOTALL)
     if m:
-        return json.loads(m.group(1))
+        return _parse(m.group(1))
     # find first { .... last }
     start = raw.find("{")
     end = raw.rfind("}")
     if start != -1 and end != -1 and end > start:
-        return json.loads(raw[start : end + 1])
+        return _parse(raw[start : end + 1])
     raise ValueError("No JSON object found in model response")
 
 
@@ -116,7 +125,7 @@ async def _claude_json(system: str, user_text: str, session_id: str) -> dict:
         api_key=EMERGENT_LLM_KEY,
         session_id=session_id,
         system_message=system,
-    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=4096)
+    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=8192)
     msg = UserMessage(text=user_text)
     response = await chat.send_message(msg)
     text = response if isinstance(response, str) else str(response)
