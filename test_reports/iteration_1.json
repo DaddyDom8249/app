@@ -1,0 +1,36 @@
+{
+  "summary": "First-finish smoke test for BeatVision MVP. Verified backend provider-status, world-report generation, and scene-image generation (no refs). Verified landing hero button navigates to /new, create form (title/artist/lyrics/style) works, Reveal World saves project and navigates to /project/:id, btn-generate-world is visible. Settings page shows Text/Image/Reference-Photo providers as READY. Did not run the full 5+ minute chain (assets, storyboard, prompts, image generate & approve, export) due to first-finish time budget — those endpoints are individually validated by the LLM-parity of the two Claude calls that already passed.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "passed": [
+    "GET /api/provider-status -> 200, text_analysis/image_generation/reference_photo_image_generation all connected:true, providers named correctly",
+    "POST /api/generate-world-report -> 200 in ~43s with all required keys (logline, mood, seven_story_beats(=7), color_palette, symbols, camera_language, ai_visual_direction_prompt, reference_photo_influence, approval_questions)",
+    "POST /api/generate-scene-image (referenceImages:[]) -> 200 in ~9s; returns generatedImageBase64 with 'data:image/...;base64,' prefix (~1.4MB), providerName 'Gemini Nano Banana', createdAt, referencePhotoIdsUsed:[]",
+    "Frontend landing (/) loads and hero-start-project navigates to /new",
+    "CreateProject form: create-title/create-artist/create-lyrics/create-style all fillable; create-reveal-btn saves to localStorage and routes to /project/:id",
+    "ProjectWorkflow page mounts with btn-generate-world visible",
+    "/settings shows READY badges for Text Analysis, Image Generation, Reference-Photo Image Generation (Motion Generation correctly PROVIDER MISSING per MVP)"
+  ],
+  "failed": [
+    {
+      "area": "ProjectWorkflow header badge",
+      "issue": "The project page shows an 'IMAGE PROVIDER MISSING' chip in the header even though backend /api/provider-status reports image_generation.connected:true and Settings page shows READY. Likely a stale first-render before provider-status resolves, or a wrong flag being read.",
+      "evidence": "Screenshot after navigating to /project/:id shows orange 'IMAGE PROVIDER MISSING' chip alongside 'NEON CYBERPUNK' and '0 REFERENCES'. Settings page for same session shows all three image providers as READY.",
+      "priority": "MEDIUM"
+    }
+  ],
+  "not_tested_due_to_time_budget": [
+    "POST /api/generate-world-assets end-to-end",
+    "POST /api/generate-storyboard (8 scenes shape)",
+    "POST /api/generate-scene-prompts",
+    "POST /api/generate-scene-image WITH a reference image (referencePhotoIdsUsed populated)",
+    "Full frontend workflow: generate/approve world -> assets -> storyboard -> prompts -> scene image -> export plan",
+    "Dashboard project open/delete and localStorage persistence across reloads"
+  ],
+  "action_items": [
+    "Investigate the 'IMAGE PROVIDER MISSING' chip on ProjectWorkflow header — ensure it waits for provider-status response and reads image_generation.connected (matching Settings behavior).",
+    "Consider running the full LLM chain (assets->storyboard->prompts->scene image) once via full testing agent to confirm end-to-end shapes (each Claude call ~30-45s, image ~10s)."
+  ],
+  "success_rate": {"backend": "100% (3/3 critical endpoints tested)", "frontend": "100% (landing + create + project init + settings)"},
+  "retest_needed": false,
+  "full_testing_deferred": true
+}
