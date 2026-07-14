@@ -287,6 +287,8 @@ export default function ProjectWorkflow() {
         scenePrompt: prompt?.final_polished_prompt || scene?.visual_prompt || scene?.description || "",
         stylePreset: styleLabel(project.style),
         negativePrompt: prompt?.negative_prompt || "",
+        characterConsistencyNotes: prompt?.character_consistency_notes || "",
+        environmentConsistencyNotes: prompt?.environment_consistency_notes || "",
         referenceImages: refs,
       });
       const sceneImages = { ...(project.sceneImages || {}) };
@@ -960,6 +962,29 @@ function SceneImageCard({ scene, prompt, image, imageProviderReady, activeRefs, 
           <ImageIcon className="w-8 h-8 text-neutral-700" strokeWidth={1.2} />
         )}
       </div>
+
+      {/* Provider label overlaid on image */}
+      {image?.imageDataUrl && image?.sourceType === "generated_from_reference" && (
+        <div className="-mt-3 mb-3">
+          <span
+            className="badge badge-ref-active"
+            data-testid={`scene-img-provider-${scene.scene_number}`}
+          >
+            <span className="badge-dot" />
+            Generated with {image.providerName || "Gemini Nano Banana"}
+          </span>
+        </div>
+      )}
+      {image?.imageDataUrl && image?.sourceType === "manual_upload" && (
+        <div className="-mt-3 mb-3">
+          <span
+            className="badge badge-locked"
+            data-testid={`scene-img-source-manual-${scene.scene_number}`}
+          >
+            <span className="badge-dot" />Manual upload
+          </span>
+        </div>
+      )}
 
       {/* Active refs display */}
       <div className="mb-3">

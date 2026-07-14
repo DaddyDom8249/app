@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 5 audit of STRICT provider routing (Claude=text only, Gemini=image only) — 14/14 pytest passed, Settings + ProjectWorkflow UI verified. Backend: /api/provider-status returns all 5 required keys (text_analysis, image_generation, reference_photo_image_generation, motion_generation, video_export) each with 'purpose' field; text keys mention 'Claude Sonnet 4.5' and image keys mention 'Gemini Nano Banana'. Text endpoints (/api/generate-world-report, /api/generate-world-assets, /api/generate-storyboard, /api/generate-scene-prompts) all return 200 with fully-shaped text schemas and NO 'generatedImageBase64' / 'data:image/' anywhere in response bodies (verified via raw text scan). /api/generate-scene-image accepts the new characterConsistencyNotes + environmentConsistencyNotes payload fields (no 422). On budget-exceeded state the endpoint returns HTTP 503 with detail EXACTLY 'Image generation is blocked because the Emergent LLM budget is exceeded.' (verified live — key is currently over budget). Static code audit confirms with_model('anthropic', CLAUDE_MODEL) appears exactly once and only inside _claude_json (line 133); with_model('gemini', GEMINI_IMAGE_MODEL) appears exactly once and only inside generate_scene_image (line 493). fallbacks.py contains no 'generatedImageBase64', 'data:image/', 'imageDataUrl', or 'base64,' — 100% text-only fallbacks. api.js projectContext strips imageDataUrl before every text-endpoint POST; generateSceneImage sends characterConsistencyNotes + environmentConsistencyNotes in the body. Frontend: Settings /settings renders all 5 provider cards with EXACT titles: 'Claude Text Generation' READY, 'Gemini Image Generation' READY, 'Reference-Photo Image Generation' READY, 'Motion Generation' PROVIDER MISSING, 'Video Export' DEMO MODE. ProjectWorkflow SceneImageCard: generated_from_reference scene renders visible pill 'Generated with Gemini Nano Banana' at data-testid scene-img-provider-1; manual_upload scene renders pill 'Manual upload' at data-testid scene-img-source-manual-2. Motion/Export section is locked ('Approve at least one scene image to unlock.') until user clicks scene-img-approve-{n}. Route is /project/:id (singular) — noted for future testing agents.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_provider_routing.py",
+    "/app/backend/tests/test_fallback_resilience.py",
+    "/app/backend/tests/test_beatvision_full_chain.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:133 — with_model('anthropic', CLAUDE_MODEL) confirmed to live ONLY inside _claude_json; test_claude_used_only_in_claude_json regex proves exactly 1 occurrence and it falls inside the function span. Any future dev adding a second anthropic call outside _claude_json will fail CI via this test.",
+    "server.py:493 — with_model('gemini', GEMINI_IMAGE_MODEL) confirmed to live ONLY inside generate_scene_image; test_gemini_used_only_in_generate_scene_image protects this.",
+    "server.py:500-513 — Excellent: _classify_llm_error branches inside generate_scene_image map budget_exceeded → 503 with exact 'Image generation is blocked...' string; timeout → 504 with 'Gemini Nano Banana image generation is unavailable...'; everything else → 502 with the same unavailable string. Matches spec wording precisely (previous iteration flagged this as raw HTML 502 — now RESOLVED).",
+    "server.py:515-519 — Empty images list branch correctly maps to 502 with the same 'unavailable' wording. Good defensive coding.",
+    "fallbacks.py — Confirmed zero image content leakage; text-only schemas.",
+    "api.js:8-27 projectContext — imageDataUrl explicitly commented '// NO imageDataUrl for text generation.' and omitted, preventing base64 leakage into Claude calls. api.js:70-97 generateSceneImage forwards imageDataUrl only for the Gemini endpoint. Clean separation.",
+    "ProjectWorkflow.jsx:967-987 SceneImageCard — provider pill and manual pill both wired with correct data-testids and mutually exclusive on sourceType. Note: the 'Generated with {image.providerName || \"Gemini Nano Banana\"}' fallback text guarantees the badge always shows the correct provider even if backend response lacks providerName.",
+    "ProjectWorkflow.jsx:182 approvedImagesCount — derived from sceneImages values with approved=true; a generated scene is created with approved=false (line 298), so it correctly does NOT count until user clicks scene-img-approve-{n}. Verified by UI: Motion section locked with 2 unapproved scene images present.",
+    "Settings.jsx CARDS array — exact spec titles verified via UI text_content grep."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_provider_routing.py (NEW — 14 pytest tests covering routing, error strings, provider-status keys, code audit, frontend api.js audit)"
+  ],
+  "success_rate": {
+    "backend": "100% (14/14 pytest passed)",
+    "frontend": "100% (5/5 provider cards present with exact titles + expected badges; scene-img-provider-1 and scene-img-source-manual-2 both render with exact spec wording; Motion section locked before approval)"
+  },
+  "test_credentials": "None required — MVP has no auth.",
+  "seed_data_creation": "Playwright test seeds project 'TEST-provider-badges' directly into localStorage key 'beatvision.projects.v1' with worldReportApproved/styleBibleApproved/characterSheetApproved/environmentSheetApproved/storyboardApproved/scenePromptsApproved=true and two sceneImages entries (scene 1: generated_from_reference, scene 2: manual_upload) to exercise both badge variants without needing a live Gemini call. No server-side seed data.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "1) Route is /project/:id (singular) NOT /projects/:id. 2) EMERGENT_LLM_KEY is currently over budget — image endpoint returns 503 with exact spec wording, text endpoints degrade to fallback with _fallback=true (both verified). 3) test_provider_routing.py has ZERO retries and passes in ~2s; safe for CI. 4) Static code audit tests (TestCodeAudit + TestFrontendApiAudit) protect the routing invariants forever — any future dev adding a stray 'anthropic' or 'gemini' with_model call outside the sanctioned functions will fail CI. 5) All spec-mandated user-facing strings are asserted verbatim in TestSceneImageErrorMapping. 6) The Motion/Export counter only increments after scene-img-approve-{n} — verified indirectly (locked state pre-approval, counter code is Object.values(sceneImages).filter(s=>s.approved).length). 7) Iteration 4's 'residual minor issue' (raw HTML 502 on Gemini failure) is now RESOLVED — endpoint returns structured JSON with 503/502/504 + exact spec detail strings.",
+  "rca_of_the_issue": "USER CONCERN 'image generation might be using Claude/fallback' — investigated and DISPROVEN by static + runtime audit. Root confirmation: (a) grep proves anthropic with_model exists once, only inside _claude_json which is only invoked from world-report/world-assets/storyboard/scene-prompts endpoints; (b) grep proves gemini with_model exists once, only inside /api/generate-scene-image; (c) fallbacks.py never emits generatedImageBase64 or any data URL — so even in the Claude-degraded state, no fake images are surfaced; (d) api.js splits payloads so full base64 image data only flows into /generate-scene-image; text endpoints get metadata-only payloads (confirmed 224-byte payload in iteration 4). No cross-provider bleed exists. SPEC COMPLIANCE ADDITIONS in this iteration: generate_scene_image now catches budget/timeout/other and returns structured JSON with exact user-facing wording (was raw HTML 502 in iteration 4 — now resolved). SceneImageRequest gained characterConsistencyNotes + environmentConsistencyNotes optional fields; api.js and ProjectWorkflow.jsx wire them through. UI adds explicit badges 'Generated with Gemini Nano Banana' (data-testid scene-img-provider-{n}) and 'Manual upload' (data-testid scene-img-source-manual-{n}) so the user visually confirms provenance. Settings page lists all 5 provider cards with exact required titles."
+}

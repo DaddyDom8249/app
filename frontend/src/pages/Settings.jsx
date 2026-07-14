@@ -7,22 +7,22 @@ const CARDS = [
   {
     key: "text_analysis",
     icon: Cpu,
-    title: "Text Analysis",
-    what: "Generates the Visual World Report, storyboards, and polished scene prompts.",
+    title: "Claude Text Generation",
+    what: "Generates the Visual World Report, World Assets, Storyboard, and polished Scene Prompts. Provider: Anthropic Claude Sonnet 4.5.",
     cost: "Uses your Emergent LLM credits.",
   },
   {
     key: "image_generation",
     icon: ImageIcon,
-    title: "Image Generation",
-    what: "Turns approved scene prompts into cinematic scene images.",
+    title: "Gemini Image Generation",
+    what: "Turns approved scene prompts into cinematic scene images. Provider: Google Gemini Nano Banana.",
     cost: "Uses Emergent LLM credits when connected.",
   },
   {
     key: "reference_photo_image_generation",
     icon: Camera,
     title: "Reference-Photo Image Generation",
-    what: "Uses your uploaded reference photos to guide each generated scene image.",
+    what: "Uses your uploaded reference photos to guide each generated scene image. Provider: Google Gemini Nano Banana.",
     cost: "Uses Emergent LLM credits when connected.",
   },
   {

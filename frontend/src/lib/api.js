@@ -73,6 +73,8 @@ export async function generateSceneImage({
   scenePrompt,
   stylePreset,
   negativePrompt,
+  characterConsistencyNotes,
+  environmentConsistencyNotes,
   referenceImages,
 }) {
   const { data } = await client.post("/generate-scene-image", {
@@ -81,6 +83,8 @@ export async function generateSceneImage({
     scenePrompt,
     stylePreset,
     negativePrompt: negativePrompt || "",
+    characterConsistencyNotes: characterConsistencyNotes || "",
+    environmentConsistencyNotes: environmentConsistencyNotes || "",
     referenceImages: (referenceImages || []).map((r) => ({
       id: r.id,
       type: r.type,

@@ -81,6 +81,8 @@ class SceneImageRequest(BaseModel):
     scenePrompt: str
     stylePreset: str
     negativePrompt: Optional[str] = ""
+    characterConsistencyNotes: Optional[str] = ""
+    environmentConsistencyNotes: Optional[str] = ""
     referenceImages: List[ReferencePhotoPayload] = Field(default_factory=list)
 
 
@@ -187,20 +189,23 @@ async def provider_status():
         "text_analysis": {
             "connected": text_ready,
             "provider": "Anthropic Claude Sonnet 4.5 (via Emergent)" if text_ready else None,
+            "purpose": "Text generation: World Report, World Assets, Storyboard, Scene Prompts",
             "status": "ready" if text_ready else "demo_mode",
         },
         "image_generation": {
             "connected": image_ready,
-            "provider": "Gemini Nano Banana (via Emergent)" if image_ready else None,
+            "provider": "Google Gemini Nano Banana (via Emergent)" if image_ready else None,
+            "purpose": "Scene image generation (text-to-image)",
             "status": "ready" if image_ready else "not_connected",
         },
         "reference_photo_image_generation": {
             "connected": image_ready,
-            "provider": "Gemini Nano Banana (via Emergent)" if image_ready else None,
+            "provider": "Google Gemini Nano Banana (via Emergent)" if image_ready else None,
+            "purpose": "Scene image generation guided by uploaded reference photos",
             "status": "ready" if image_ready else "not_connected",
         },
-        "motion_generation": {"connected": False, "status": "not_connected"},
-        "video_export": {"connected": False, "status": "demo_plan_only"},
+        "motion_generation": {"connected": False, "purpose": "Turn stills into short motion clips", "status": "not_connected"},
+        "video_export": {"connected": False, "purpose": "Stitch approved clips into MP4", "status": "demo_plan_only"},
     }
 
 
@@ -474,6 +479,8 @@ async def generate_scene_image(req: SceneImageRequest):
     prompt = f"""Create a cinematic music-video still.
 Style preset: {req.stylePreset}
 Scene prompt: {req.scenePrompt}
+Character consistency: {req.characterConsistencyNotes or '(none)'}
+Environment consistency: {req.environmentConsistencyNotes or '(none)'}
 Reference photo guidance (visual continuity — mirror these):
 {ref_desc}
 Avoid: {req.negativePrompt or 'blur, low quality, watermark, distorted anatomy'}"""
@@ -493,14 +500,23 @@ Avoid: {req.negativePrompt or 'blur, low quality, watermark, distorted anatomy'}
         if reason == "budget_exceeded":
             raise HTTPException(
                 status_code=503,
-                detail="Image provider budget exhausted. Top up your Emergent LLM key and retry, or upload manually.",
+                detail="Image generation is blocked because the Emergent LLM budget is exceeded.",
             )
         if reason == "timeout":
-            raise HTTPException(status_code=504, detail="Image provider timed out. Please retry.")
-        raise HTTPException(status_code=502, detail=f"Image provider error: {str(e)[:200]}")
+            raise HTTPException(
+                status_code=504,
+                detail="Gemini Nano Banana image generation is unavailable. Upload manually or try again later.",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini Nano Banana image generation is unavailable. Upload manually or try again later.",
+        )
 
     if not images:
-        raise HTTPException(status_code=502, detail="Image provider returned no image.")
+        raise HTTPException(
+            status_code=502,
+            detail="Gemini Nano Banana image generation is unavailable. Upload manually or try again later.",
+        )
 
     img = images[0]
     return {
