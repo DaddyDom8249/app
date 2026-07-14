@@ -5,6 +5,7 @@ from starlette.middleware.cors import CORSMiddleware
 import os
 import json
 import re
+import asyncio
 import logging
 import uuid
 from pathlib import Path
@@ -125,7 +126,7 @@ async def _claude_json(system: str, user_text: str, session_id: str) -> dict:
         api_key=EMERGENT_LLM_KEY,
         session_id=session_id,
         system_message=system,
-    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=8192)
+    ).with_model("anthropic", CLAUDE_MODEL).with_params(max_tokens=4096)
     msg = UserMessage(text=user_text)
     response = await chat.send_message(msg)
     text = response if isinstance(response, str) else str(response)
@@ -215,112 +216,122 @@ Return this JSON schema:
 
 @api_router.post("/generate-world-assets")
 async def generate_world_assets(req: WorldAssetsRequest):
+    """Split into 3 concurrent Claude calls to stay under Cloudflare's ~60s ingress timeout."""
     photos_txt = _summarize_photos(req.referencePhotos)
-    system = (
-        "You are BeatVision. Given an approved Visual World Report, generate three separate assets: "
-        "world_style_bible, character_sheet, environment_sheet. Return ONLY JSON."
+    world_ctx = json.dumps(req.worldReport)[:2500]
+    header = f"Song: {req.title} by {req.artist or 'Unknown'} | Style: {req.style}\nReference photos:\n{photos_txt}\n\nApproved World Report:\n{world_ctx}\n\n"
+
+    style_prompt = header + """Return ONLY this JSON:
+{
+  "overall_look": string,
+  "lighting": string,
+  "color_rules": string,
+  "camera_rules": string,
+  "texture_material_rules": string,
+  "symbol_rules": string,
+  "reference_photo_usage_rules": string,
+  "what_to_avoid": string
+}"""
+    character_prompt = header + """Return ONLY this JSON for the main character sheet:
+{
+  "name_role": string,
+  "appearance": string,
+  "clothing": string,
+  "emotional_state": string,
+  "signature_object": string,
+  "consistency_rules": string,
+  "character_reference_photo_notes": string
+}"""
+    environment_prompt = header + """Return ONLY this JSON for the environment sheet:
+{
+  "main_location": string,
+  "atmosphere": string,
+  "time_of_day": string,
+  "weather": string,
+  "key_objects": [string],
+  "background_details": string,
+  "consistency_rules": string,
+  "environment_reference_photo_notes": string
+}"""
+    system = "You are BeatVision. Return ONLY the requested JSON object. No prose."
+    sid = uuid.uuid4()
+    style, character, environment = await asyncio.gather(
+        _claude_json(system, style_prompt, f"world-assets-style-{sid}"),
+        _claude_json(system, character_prompt, f"world-assets-char-{sid}"),
+        _claude_json(system, environment_prompt, f"world-assets-env-{sid}"),
     )
-    user = f"""Song: {req.title} by {req.artist or 'Unknown'} | Style: {req.style}
-Reference photos:
-{photos_txt}
-
-Approved World Report:
-{json.dumps(req.worldReport)[:5000]}
-
-Return JSON:
-{{
-  "world_style_bible": {{
-    "overall_look": string,
-    "lighting": string,
-    "color_rules": string,
-    "camera_rules": string,
-    "texture_material_rules": string,
-    "symbol_rules": string,
-    "reference_photo_usage_rules": string,
-    "what_to_avoid": string
-  }},
-  "character_sheet": {{
-    "name_role": string,
-    "appearance": string,
-    "clothing": string,
-    "emotional_state": string,
-    "signature_object": string,
-    "consistency_rules": string,
-    "character_reference_photo_notes": string
-  }},
-  "environment_sheet": {{
-    "main_location": string,
-    "atmosphere": string,
-    "time_of_day": string,
-    "weather": string,
-    "key_objects": [string],
-    "background_details": string,
-    "consistency_rules": string,
-    "environment_reference_photo_notes": string
-  }}
-}}"""
-    data = await _claude_json(system, user, f"world-assets-{uuid.uuid4()}")
-    return data
+    return {
+        "world_style_bible": style,
+        "character_sheet": character,
+        "environment_sheet": environment,
+    }
 
 
 @api_router.post("/generate-storyboard")
 async def generate_storyboard(req: StoryboardRequest):
+    """Split into 2 concurrent calls (scenes 1-4 and 5-8) to fit the 60s timeout."""
     photos_txt = _summarize_photos(req.referencePhotos)
-    system = (
-        "You are BeatVision. Generate a storyboard of EXACTLY 8 scenes. Return ONLY JSON."
-    )
     ref_ids = [p.id for p in req.referencePhotos]
-    user = f"""Song: {req.title} by {req.artist or 'Unknown'} | Style: {req.style}
+    header = f"""Song: {req.title} by {req.artist or 'Unknown'} | Style: {req.style}
 Lyrics: {req.lyrics or '(none)'}
 Available reference photo ids: {ref_ids}
 Reference photos:
 {photos_txt}
 
-World Report summary: {json.dumps(req.worldReport)[:1500]}
-Style Bible summary: {json.dumps(req.styleBible)[:1000]}
-Character Sheet summary: {json.dumps(req.characterSheet)[:800]}
-Environment Sheet summary: {json.dumps(req.environmentSheet)[:800]}
+World Report summary: {json.dumps(req.worldReport)[:1200]}
+Style Bible summary: {json.dumps(req.styleBible)[:800]}
+Character Sheet summary: {json.dumps(req.characterSheet)[:600]}
+Environment Sheet summary: {json.dumps(req.environmentSheet)[:600]}
 
-Return JSON:
-{{
+"""
+    schema = """Return ONLY this JSON:
+{
   "scenes": [
-    {{
-      "scene_number": int,          // 1..8
-      "timestamp_range": string,     // e.g. "0:00 - 0:22"
+    {
+      "scene_number": int,
+      "timestamp_range": string,
       "scene_title": string,
       "description": string,
       "camera_movement": string,
       "color_emphasis": string,
       "symbol": string,
-      "reference_photo_ids": [string],   // subset of available reference photo ids
+      "reference_photo_ids": [string],
       "visual_prompt": string
-    }}
+    }
   ]
-}}
-Exactly 8 scenes."""
-    data = await _claude_json(system, user, f"storyboard-{uuid.uuid4()}")
-    return data
+}
+"""
+    system = "You are BeatVision. Return ONLY the requested JSON. No prose."
+    p1 = header + schema + "Provide EXACTLY 4 scenes with scene_number 1,2,3,4 (opening act)."
+    p2 = header + schema + "Provide EXACTLY 4 scenes with scene_number 5,6,7,8 (climax + resolution). Continue the narrative arc."
+
+    sid = uuid.uuid4()
+    part1, part2 = await asyncio.gather(
+        _claude_json(system, p1, f"storyboard-a-{sid}"),
+        _claude_json(system, p2, f"storyboard-b-{sid}"),
+    )
+    scenes = (part1.get("scenes") or []) + (part2.get("scenes") or [])
+    # ensure sorted 1..8
+    scenes.sort(key=lambda s: s.get("scene_number", 0))
+    return {"scenes": scenes}
 
 
 @api_router.post("/generate-scene-prompts")
 async def generate_scene_prompts(req: ScenePromptsRequest):
+    """Split into 2 concurrent calls: prompts 1-4 and 5-8."""
     photos_txt = _summarize_photos(req.referencePhotos)
-    system = (
-        "You are BeatVision. For each scene, return a polished image-generation prompt. Return ONLY JSON."
-    )
-    user = f"""Song: {req.title} | Style: {req.style}
+    header = f"""Song: {req.title} | Style: {req.style}
 Reference photos:
 {photos_txt}
 
-Style Bible: {json.dumps(req.styleBible)[:1200]}
-Character Sheet: {json.dumps(req.characterSheet)[:800]}
-Environment Sheet: {json.dumps(req.environmentSheet)[:800]}
-Storyboard (8 scenes): {json.dumps(req.storyboard)[:3000]}
-
-Return JSON:
-{{
+Style Bible: {json.dumps(req.styleBible)[:1000]}
+Character Sheet: {json.dumps(req.characterSheet)[:700]}
+Environment Sheet: {json.dumps(req.environmentSheet)[:700]}
+"""
+    schema = """Return ONLY this JSON:
+{
   "prompts": [
-    {{
+    {
       "scene_number": int,
       "scene_description": string,
       "character_consistency_notes": string,
@@ -331,12 +342,25 @@ Return JSON:
       "lighting": string,
       "mood": string,
       "negative_prompt": string,
-      "final_polished_prompt": string    // ready to paste into an image generator
-    }}
+      "final_polished_prompt": string
+    }
   ]
-}}"""
-    data = await _claude_json(system, user, f"scene-prompts-{uuid.uuid4()}")
-    return data
+}
+"""
+    system = "You are BeatVision. Return ONLY the requested JSON. No prose."
+    sb_first = [s for s in (req.storyboard or []) if s.get("scene_number", 0) <= 4]
+    sb_second = [s for s in (req.storyboard or []) if s.get("scene_number", 0) >= 5]
+    p1 = header + f"Storyboard scenes 1-4: {json.dumps(sb_first)[:2500]}\n\n" + schema + "Return EXACTLY 4 prompts for scene_number 1,2,3,4."
+    p2 = header + f"Storyboard scenes 5-8: {json.dumps(sb_second)[:2500]}\n\n" + schema + "Return EXACTLY 4 prompts for scene_number 5,6,7,8."
+
+    sid = uuid.uuid4()
+    part1, part2 = await asyncio.gather(
+        _claude_json(system, p1, f"scene-prompts-a-{sid}"),
+        _claude_json(system, p2, f"scene-prompts-b-{sid}"),
+    )
+    prompts = (part1.get("prompts") or []) + (part2.get("prompts") or [])
+    prompts.sort(key=lambda p: p.get("scene_number", 0))
+    return {"prompts": prompts}
 
 
 @api_router.post("/generate-scene-image")

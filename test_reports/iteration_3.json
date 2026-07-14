@@ -1,0 +1,64 @@
+{
+  "summary": "Concurrency fix WORKED. First fresh run passed 5/7 backend tests: provider-status, world-report (~48s), world-assets (3-way concurrent, ~40s), storyboard (2-way concurrent, ~40s), scene-image fallback. Only /api/generate-scene-prompts still 502'd once with the real full-chain payload (world-report+style-bible+char+env+full storyboard) — the 2-way concurrent split gets close to the ~60s Cloudflare ingress limit but the fatter payload occasionally crosses it. Standalone repro with a minimal payload: 33.5s → 200. Second consecutive full-chain run failed at world-assets with HTTP 500 'Budget has been exceeded! Current cost: 1.021303, Max budget: 1.0' — the topped-up EMERGENT_LLM_KEY budget was consumed by the two chain runs. Per-scene reference-photo OVERRIDE UI flow (items 7–15) could NOT be verified end-to-end via UI because the LLM chain now requires budget again. Code review of the override wiring in ProjectWorkflow.jsx / StoryboardSceneCard / SceneImageCard remains correct — logic and data-testids match spec exactly. Frontend loads with no runtime errors and no false 'IMAGE PROVIDER MISSING' chip (item 17 & 18 confirmed).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "/api/generate-scene-prompts",
+        "issue": "Returns 502 Bad Gateway (Cloudflare edge timeout ~60s) when called with the realistic full-chain payload (8-scene storyboard + full world-report + style-bible + char + env). Standalone with a minimal payload it completes in 33.5s. The 2-way concurrent split is not enough headroom — pathological Claude latency pushes one of the two sub-calls past ~55s. Repro: run test_04_generate_scene_prompts_with_override after a real storyboard chain (100% failure observed in run 1). Fix: split into 4x2-prompt sub-calls (4-way concurrent) OR reduce output verbosity per prompt (currently 10+ keys per scene including negative_prompt & final_polished_prompt) OR stream via SSE.",
+        "priority": "HIGH"
+      },
+      {
+        "endpoint": "EMERGENT_LLM_KEY budget",
+        "issue": "Budget hit again after 2 full-chain runs: 'Current cost: 1.021303, Max budget: 1.0'. All chain endpoints now return HTTP 500 with LiteLLM 'Budget has been exceeded!' — blocks any further LLM verification (both backend & UI). Note: iteration_2 was $0.42/$0.40; user has topped up to $1.0 which lasts roughly one full happy-path plus one failed retry.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "/api/generate-world-report",
+        "issue": "48.7s in one measurement — still >50% of the 60s Cloudflare budget. A slow Claude spike could 502 in production; consider splitting seven_story_beats out into its own sub-call for defense-in-depth."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Full override E2E (items 7–15)",
+        "issue": "Could NOT verify via UI in this iteration: after world-report + world-assets + storyboard succeed once, budget exhaustion causes scene-prompts to 500 in the browser. User sees a toast but cannot progress to scene 1 with the override applied.",
+        "affected_selectors": ["btn-generate-prompts", "storyboard-refs-edit-1", "storyboard-ref-toggle-1-*", "scene-img-refs-1"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_beatvision_full_chain.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "URGENT: Top up EMERGENT_LLM_KEY budget again (currently $1.02/$1.0). Each full chain run costs ~$0.5, plan for at least $3.0 to allow regression + overrides + a re-run.",
+    "Optimise /api/generate-scene-prompts further: split into 4 concurrent calls (each returning 2 prompts) OR reduce Claude output per scene (drop character/environment consistency notes and let the LLM inherit them). Current 2-way split leaves ~5s margin against Cloudflare's 60s cap — not safe.",
+    "Consider server-side timeout guard: race the outer asyncio.gather against asyncio.wait_for(50s) so the client gets a clean 504 with retry hint instead of a Cloudflare HTML 502.",
+    "After budget is refreshed, re-run: `REACT_APP_BACKEND_URL=... pytest /app/backend/tests/test_beatvision_full_chain.py -n 0 -v -s` to confirm scene-prompts + override path.",
+    "Optional: gate expensive endpoints behind idempotent caching by hash(payload) so retries are free (helps both budget & 502 recovery)."
+  ],
+  "critical_code_review_comments": [
+    "server.py generate_scene_prompts: header string is ~4KB (world+style+char+env summaries capped at 1000/700/700 chars) and each sub-call sends storyboard scenes 1-4 or 5-8 (up to 2500 chars). At Claude 4.5 output speed that still risks >55s per call — headroom too thin.",
+    "server.py _claude_json: no explicit HTTPX/OpenAI client timeout; relies on default. Add explicit client_timeout=55s and catch asyncio.TimeoutError to raise 504 gracefully.",
+    "server.py exception handler for Exception (not HTTPException) is correct — 502s from Cloudflare are indistinguishable client-side from FastAPI 502s; consider setting a custom JSON body on 5xx for easier UI toasts.",
+    "ProjectWorkflow.jsx effectiveRefIds() handles overrides !== null / undefined correctly and falls back to suggestions when the override list was reset to null. Override wiring is correct on code review, but was NOT exercised end-to-end this iteration.",
+    "api.js still has no exponential-backoff retry. A single 502 kills the whole chain; adding one retry on 502/504 would meaningfully improve UX given the current latency margin.",
+    "storage.js localStorage persistence — large ref data URLs (>4.5MB) silently truncated by quota; unchanged from iteration_2."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "71% on first fresh run (5/7: provider-status, world-report, world-assets, storyboard, scene-image-fallback). scene-prompts + scene-image-with-override blocked. Second run 14% (1/7) after budget exhausted.",
+    "frontend": "50% verifiable (landing loads, no false IMAGE PROVIDER MISSING chip, no ErrorBoundary crash, testids all present in code). Override E2E not verifiable due to budget."
+  },
+  "test_credentials": "None required — no auth on BeatVision MVP.",
+  "seed_data_creation": "test suite creates TEST_ prefixed project 'TEST_Wolves in the Rain' via API calls only; no server-side persistence exists.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "1) Budget MUST be topped up again (>= $3.0 recommended) before any LLM tests. 2) Concurrency fix largely worked — world-assets and storyboard now stable under 60s. The only remaining latency risk is /api/generate-scene-prompts which needs a 4-way split OR schema trimming. 3) The pytest suite at /app/backend/tests/test_beatvision_full_chain.py is unchanged and ready — test_04 exercises the override path (substitutes scene[0].reference_photo_ids with env+mood before calling scene-prompts); test_05 verifies scene-image responds with correct referencePhotoIdsUsed matching the override set; test_06 verifies fallback (no override). 4) UI override E2E flow (items 7–15 in the request) is fully wired in ProjectWorkflow.jsx and StoryboardSceneCard — data-testids storyboard-suggested-*, storyboard-refs-edit-*, storyboard-refs-editor-*, storyboard-ref-toggle-*, storyboard-refs-clear-*, scene-img-refs-* all present. Just needs a working chain to exercise. 5) preview-export-plan / export-plan-summary flow (item 16) not yet exercised.",
+  "rca_of_the_issue": "PRIMARY REMAINING BOTTLENECK: /api/generate-scene-prompts. Two concurrent Claude calls each producing 4 prompts × ~10 keys still hits ~55–65s wall clock. With the realistic full-chain payload (world-report + style-bible + char + env stringified into the header), the tail latency of the slower sub-call sometimes crosses Cloudflare's 60s ingress timeout, returning a Cloudflare 502 HTML page while the backend is still awaiting the LiteLLM completion. Reproduction: run the full pytest chain (test_01→04) — scene-prompts failed once (test run 1). Isolated repro with minimal payload succeeds in 33.5s, confirming this is a payload/output-size latency margin issue, not a permanent break. SECONDARY: EMERGENT_LLM_KEY budget resource — the topped-up $1.0 is consumed by two full chain runs at ~$0.5 each; second run 500s immediately at world-assets. Mitigations required from main agent: (a) further split scene-prompts (4-way concurrent) or drop 2-3 output keys per prompt; (b) top up budget to at least $3.0; (c) optionally add server-side asyncio.wait_for(55s) to convert the 502 into a graceful 504."
+}
