@@ -332,7 +332,7 @@ export default function ProjectWorkflow() {
     });
   }
 
-  function useSceneReferenceSuggestions(scene) {
+  function resetSceneReferenceSuggestions(scene) {
     const key = sceneReferenceKey(scene);
     if (!key) return;
 
@@ -665,7 +665,7 @@ export default function ProjectWorkflow() {
                             : "suggested"
                         }
                         onUseSuggestions={() =>
-                          useSceneReferenceSuggestions(s)
+                          resetSceneReferenceSuggestions(s)
                         }
                         onUseNone={() =>
                           setSceneReferenceSelection(s, [])
@@ -790,7 +790,7 @@ export default function ProjectWorkflow() {
                         : "suggested"
                     }
                     onUseSuggestions={() =>
-                      useSceneReferenceSuggestions(s)
+                      resetSceneReferenceSuggestions(s)
                     }
                     onUseNone={() =>
                       setSceneReferenceSelection(s, [])
