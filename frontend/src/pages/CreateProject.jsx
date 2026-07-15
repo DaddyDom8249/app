@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { STYLE_PRESETS } from "@/lib/constants";
-import { newProject, upsertProject } from "@/lib/storage";
+import { newProject, upsertProject, StorageQuotaError } from "@/lib/storage";
 import ReferencePhotoUploader from "@/components/ReferencePhotoUploader";
 import { Sparkles } from "lucide-react";
 import { toast } from "sonner";
@@ -25,15 +25,26 @@ export default function CreateProject() {
       return;
     }
     const project = newProject(form);
-    const saved = upsertProject(project);
-    if (!saved) {
-      toast.error(
-        "Could not save project to browser storage. Try removing large reference photos."
-      );
-      return;
+
+    try {
+      const saved = upsertProject(project);
+      toast.success("Project created");
+      nav(`/project/${saved.id}`);
+    } catch (error) {
+      console.error(error);
+
+      if (
+        error instanceof StorageQuotaError ||
+        error?.code === "BEATVISION_STORAGE_QUOTA"
+      ) {
+        toast.error(
+          "Browser storage is full. Remove large reference or scene images before adding more."
+        );
+        return;
+      }
+
+      toast.error("Could not save project to browser storage.");
     }
-    toast.success("Project created");
-    nav(`/project/${saved.id}`);
   }
 
   return (

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getProject, upsertProject, fileToDataUrl } from "@/lib/storage";
+import { getProject, upsertProject, fileToDataUrl, StorageQuotaError } from "@/lib/storage";
 import { styleLabel, refTypeLabel, REFERENCE_TYPES, MOTION_TYPES } from "@/lib/constants";
 import {
   generateWorldReport,
@@ -34,6 +34,9 @@ const FALLBACK_REASON_LABELS = {
   network: "Network error reaching LLM",
   unavailable: "LLM unavailable",
 };
+
+const GEMINI_UNAVAILABLE_MESSAGE =
+  "Gemini Nano Banana image generation is unavailable or blocked by budget. Upload manually or try again later.";
 
 function FallbackBanner({ data, onRetry, testid }) {
   if (!data || !data._fallback) return null;
@@ -126,7 +129,29 @@ export default function ProjectWorkflow() {
   function persist(patch) {
     setProject((prev) => {
       const next = { ...prev, ...patch };
-      upsertProject(next);
+
+      try {
+        upsertProject(next);
+      } catch (error) {
+        console.error("Project persistence failed", error);
+
+        if (
+          error instanceof StorageQuotaError ||
+          error?.code === "BEATVISION_STORAGE_QUOTA"
+        ) {
+          toast.error(
+            "Browser storage is full. Remove large reference or scene images before adding more."
+          );
+          toast.warning(
+            "The latest change is visible now, but it may not survive a page refresh."
+          );
+        } else {
+          toast.error(
+            "The latest project change could not be saved to browser storage."
+          );
+        }
+      }
+
       return next;
     });
   }
@@ -261,18 +286,88 @@ export default function ProjectWorkflow() {
     }
   }
 
+  function sceneReferenceKey(scene) {
+    return String(scene?.scene_number ?? scene?.id ?? "");
+  }
+
+  function validReferenceIds(ids) {
+    const validIds = new Set(
+      (project.referencePhotos || []).map((reference) => reference.id)
+    );
+
+    return Array.isArray(ids)
+      ? [...new Set(ids)].filter((id) => validIds.has(id))
+      : [];
+  }
+
+  function hasSceneReferenceSelection(scene) {
+    return Object.prototype.hasOwnProperty.call(
+      project.sceneReferencePhotoIds || {},
+      sceneReferenceKey(scene)
+    );
+  }
+
   function effectiveRefIds(scene) {
     if (!scene) return [];
-    const overrides = scene.reference_photo_overrides;
-    if (overrides && overrides.length > 0) return overrides;
-    if (overrides === null || overrides === undefined) return scene.reference_photo_ids || [];
-    // overrides === [] means user cleared to zero, still fall back to suggestions per spec
-    return scene.reference_photo_ids || [];
+
+    const key = sceneReferenceKey(scene);
+    const selections = project.sceneReferencePhotoIds || {};
+
+    if (Object.prototype.hasOwnProperty.call(selections, key)) {
+      return validReferenceIds(selections[key]);
+    }
+
+    return validReferenceIds(scene.reference_photo_ids || []);
+  }
+
+  function setSceneReferenceSelection(scene, refIds) {
+    const key = sceneReferenceKey(scene);
+    if (!key) return;
+
+    persist({
+      sceneReferencePhotoIds: {
+        ...(project.sceneReferencePhotoIds || {}),
+        [key]: validReferenceIds(refIds),
+      },
+    });
+  }
+
+  function useSceneReferenceSuggestions(scene) {
+    const key = sceneReferenceKey(scene);
+    if (!key) return;
+
+    const next = { ...(project.sceneReferencePhotoIds || {}) };
+    delete next[key];
+
+    persist({ sceneReferencePhotoIds: next });
+  }
+
+  function handleReferencePhotosChange(referencePhotos) {
+    const safePhotos = Array.isArray(referencePhotos)
+      ? referencePhotos
+      : [];
+    const validIds = new Set(safePhotos.map((reference) => reference.id));
+
+    const sceneReferencePhotoIds = Object.fromEntries(
+      Object.entries(project.sceneReferencePhotoIds || {}).map(
+        ([key, ids]) => [
+          key,
+          Array.isArray(ids)
+            ? ids.filter((id) => validIds.has(id))
+            : [],
+        ]
+      )
+    );
+
+    persist({
+      referencePhotos: safePhotos,
+      sceneReferencePhotoIds,
+    });
   }
 
   async function doGenerateSceneImage(sceneNumber) {
     if (!imageProviderReady) {
-      toast.error("Image provider is not connected. Upload manually or connect a provider in Settings.");
+      toast.error(GEMINI_UNAVAILABLE_MESSAGE);
       return;
     }
     setLoad(`img-${sceneNumber}`, true);
@@ -303,7 +398,17 @@ export default function ProjectWorkflow() {
       persist({ sceneImages });
       toast.success(`Scene ${sceneNumber} image generated`);
     } catch (e) {
-      toast.error(e.response?.data?.detail || e.message || "Image generation failed");
+      const status = e.response?.status;
+
+      if (!e.response || [402, 429, 502, 503, 504].includes(status)) {
+        toast.error(GEMINI_UNAVAILABLE_MESSAGE);
+      } else {
+        toast.error(
+          e.response?.data?.detail ||
+            e.message ||
+            "Image generation failed"
+        );
+      }
     } finally {
       setLoad(`img-${sceneNumber}`, false);
     }
@@ -384,7 +489,7 @@ export default function ProjectWorkflow() {
         </p>
         <ReferencePhotoUploader
           photos={project.referencePhotos || []}
-          onChange={(referencePhotos) => persist({ referencePhotos })}
+          onChange={handleReferencePhotosChange}
           testidPrefix="workflow-ref"
         />
         <div className="mt-4 text-xs text-neutral-500 font-mono">
@@ -542,18 +647,35 @@ export default function ProjectWorkflow() {
               <>
                 <FallbackBanner data={project.storyboardFallback} onRetry={doStoryboard} testid="fallback-storyboard" />
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {project.storyboardScenes.map((s, i) => (
-                    <StoryboardSceneCard
-                      key={i}
-                      scene={s}
-                      referencePhotos={project.referencePhotos || []}
-                      onUpdateOverrides={(refIds) => {
-                        const scenes = [...project.storyboardScenes];
-                        scenes[i] = { ...scenes[i], reference_photo_overrides: refIds };
-                        persist({ storyboardScenes: scenes });
-                      }}
-                    />
-                  ))}
+                  {project.storyboardScenes.map((s, i) => {
+                    const suggestedIds = validReferenceIds(
+                      s.reference_photo_ids || []
+                    );
+
+                    return (
+                      <StoryboardSceneCard
+                        key={i}
+                        scene={s}
+                        referencePhotos={project.referencePhotos || []}
+                        suggestedIds={suggestedIds}
+                        selectedIds={effectiveRefIds(s)}
+                        selectionMode={
+                          hasSceneReferenceSelection(s)
+                            ? "manual"
+                            : "suggested"
+                        }
+                        onUseSuggestions={() =>
+                          useSceneReferenceSuggestions(s)
+                        }
+                        onUseNone={() =>
+                          setSceneReferenceSelection(s, [])
+                        }
+                        onChangeSelected={(refIds) =>
+                          setSceneReferenceSelection(s, refIds)
+                        }
+                      />
+                    );
+                  })}
                 </div>
               </>
             )}
@@ -646,22 +768,47 @@ export default function ProjectWorkflow() {
             )}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {(project.storyboardScenes || []).map((s) => {
-                const activeRefIds = effectiveRefIds(s);
-                const activeRefs = (project.referencePhotos || []).filter((r) => activeRefIds.includes(r.id));
+                const suggestedIds = validReferenceIds(
+                  s.reference_photo_ids || []
+                );
+
                 return (
                   <SceneImageCard
                     key={s.scene_number}
                     scene={s}
-                    prompt={project.scenePrompts?.find((sp) => sp.scene_number === s.scene_number)}
+                    prompt={project.scenePrompts?.find(
+                      (sp) => sp.scene_number === s.scene_number
+                    )}
                     image={project.sceneImages?.[s.scene_number]}
                     imageProviderReady={imageProviderReady}
-                    activeRefs={activeRefs}
-                    isOverridden={!!(s.reference_photo_overrides && s.reference_photo_overrides.length > 0)}
+                    referencePhotos={project.referencePhotos || []}
+                    suggestedIds={suggestedIds}
+                    selectedIds={effectiveRefIds(s)}
+                    selectionMode={
+                      hasSceneReferenceSelection(s)
+                        ? "manual"
+                        : "suggested"
+                    }
+                    onUseSuggestions={() =>
+                      useSceneReferenceSuggestions(s)
+                    }
+                    onUseNone={() =>
+                      setSceneReferenceSelection(s, [])
+                    }
+                    onChangeSelected={(refIds) =>
+                      setSceneReferenceSelection(s, refIds)
+                    }
                     loading={!!loading[`img-${s.scene_number}`]}
                     onGenerate={() => doGenerateSceneImage(s.scene_number)}
-                    onUpload={(file) => handleManualUpload(s.scene_number, file)}
-                    onApprove={() => approveSceneImage(s.scene_number, true)}
-                    onUnapprove={() => approveSceneImage(s.scene_number, false)}
+                    onUpload={(file) =>
+                      handleManualUpload(s.scene_number, file)
+                    }
+                    onApprove={() =>
+                      approveSceneImage(s.scene_number, true)
+                    }
+                    onUnapprove={() =>
+                      approveSceneImage(s.scene_number, false)
+                    }
                     onRemove={() => removeSceneImage(s.scene_number)}
                   />
                 );
@@ -695,58 +842,158 @@ export default function ProjectWorkflow() {
   );
 }
 
-function StoryboardSceneCard({ scene, referencePhotos, onUpdateOverrides }) {
-  const [editing, setEditing] = useState(false);
-  const suggestedIds = scene.reference_photo_ids || [];
-  const overrideIds = scene.reference_photo_overrides || null; // null = use suggestions
-  const activeIds = overrideIds && overrideIds.length > 0 ? overrideIds : suggestedIds;
-  const isOverridden = overrideIds !== null;
-
-  function toggle(id) {
-    const base = overrideIds ?? [...suggestedIds];
-    const next = base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
-    onUpdateOverrides(next);
-  }
-
-  function clearOverride() {
-    onUpdateOverrides(null);
-  }
-
-  // Group ref photos by type
-  const byType = referencePhotos.reduce((acc, r) => {
-    (acc[r.type] = acc[r.type] || []).push(r);
-    return acc;
-  }, {});
-
+function StoryboardSceneCard({
+  scene,
+  referencePhotos,
+  suggestedIds,
+  selectedIds,
+  selectionMode,
+  onUseSuggestions,
+  onUseNone,
+  onChangeSelected,
+}) {
   return (
-    <div className="bv-card p-5" data-testid={`storyboard-scene-${scene.scene_number}`}>
+    <div
+      className="bv-card p-5"
+      data-testid={`storyboard-scene-${scene.scene_number}`}
+    >
       <div className="flex justify-between items-start mb-2">
-        <div className="stage-num">S{String(scene.scene_number).padStart(2, "0")}</div>
-        <div className="overline text-neutral-500">{scene.timestamp_range}</div>
+        <div className="stage-num">
+          S{String(scene.scene_number).padStart(2, "0")}
+        </div>
+        <div className="overline text-neutral-500">
+          {scene.timestamp_range}
+        </div>
       </div>
-      <h4 className="font-display text-lg uppercase mt-2 mb-3">{scene.scene_title}</h4>
-      <p className="text-sm text-neutral-300 font-body mb-3">{scene.description}</p>
+
+      <h4 className="font-display text-lg uppercase mt-2 mb-3">
+        {scene.scene_title}
+      </h4>
+
+      <p className="text-sm text-neutral-300 font-body mb-3">
+        {scene.description}
+      </p>
+
       <div className="text-xs font-mono text-neutral-500 space-y-1">
         <div><span className="text-neutral-400">Camera:</span> {scene.camera_movement}</div>
         <div><span className="text-neutral-400">Color:</span> {scene.color_emphasis}</div>
         <div><span className="text-neutral-400">Symbol:</span> {scene.symbol}</div>
       </div>
 
-      {/* Suggested references (read-only pills) */}
-      {suggestedIds.length > 0 && (
-        <div className="mt-4 pt-3 border-t border-white/5">
-          <div className="overline text-neutral-500 mb-2">Suggested by Storyboard</div>
+      <SceneReferenceSelector
+        sceneNumber={scene.scene_number}
+        referencePhotos={referencePhotos}
+        suggestedIds={suggestedIds}
+        selectedIds={selectedIds}
+        selectionMode={selectionMode}
+        onUseSuggestions={onUseSuggestions}
+        onUseNone={onUseNone}
+        onChangeSelected={onChangeSelected}
+        testidPrefix="storyboard"
+      />
+    </div>
+  );
+}
+
+function SceneReferenceSelector({
+  sceneNumber,
+  referencePhotos,
+  suggestedIds,
+  selectedIds,
+  selectionMode,
+  onUseSuggestions,
+  onUseNone,
+  onChangeSelected,
+  testidPrefix,
+}) {
+  const [editing, setEditing] = useState(false);
+  const safePhotos = Array.isArray(referencePhotos) ? referencePhotos : [];
+  const safeSuggested = Array.isArray(suggestedIds) ? suggestedIds : [];
+  const safeSelected = Array.isArray(selectedIds) ? selectedIds : [];
+
+  const byType = safePhotos.reduce((groups, reference) => {
+    const type = reference.type || "main_character";
+    (groups[type] = groups[type] || []).push(reference);
+    return groups;
+  }, {});
+
+  function toggleReference(id) {
+    const next = safeSelected.includes(id)
+      ? safeSelected.filter((item) => item !== id)
+      : [...safeSelected, id];
+
+    onChangeSelected(next);
+  }
+
+  return (
+    <div className="mt-4 pt-3 border-t border-white/5">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+        <div>
+          <div className="overline text-neutral-500">Scene References</div>
+          <div
+            className="text-xs font-body text-neutral-300"
+            data-testid={`${testidPrefix}-ref-count-${sceneNumber}`}
+          >
+            {safeSelected.length} {safeSelected.length === 1 ? "reference" : "references"} selected
+          </div>
+        </div>
+
+        <span className={selectionMode === "suggested" ? "badge badge-locked" : "badge badge-ref-active"}>
+          <span className="badge-dot" />
+          {selectionMode === "suggested" ? "Using Suggestions" : "Manual Selection"}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3">
+        <button
+          type="button"
+          className="btn-ghost !py-1 !px-2 !text-[0.65rem]"
+          onClick={() => {
+            setEditing(false);
+            onUseSuggestions();
+          }}
+          data-testid={`${testidPrefix}-use-suggestions-${sceneNumber}`}
+        >
+          Use Suggestions
+        </button>
+
+        <button
+          type="button"
+          className="btn-ghost !py-1 !px-2 !text-[0.65rem]"
+          onClick={() => setEditing((value) => !value)}
+          data-testid={`${testidPrefix}-select-refs-${sceneNumber}`}
+        >
+          {editing ? "Done Selecting" : "Select References"}
+        </button>
+
+        <button
+          type="button"
+          className="btn-ghost !py-1 !px-2 !text-[0.65rem]"
+          onClick={() => {
+            setEditing(false);
+            onUseNone();
+          }}
+          data-testid={`${testidPrefix}-use-none-${sceneNumber}`}
+        >
+          Use None
+        </button>
+      </div>
+
+      {safeSuggested.length > 0 && (
+        <div className="mb-3">
+          <div className="overline text-neutral-500 mb-1">Storyboard Suggestions</div>
           <div className="flex flex-wrap gap-1">
-            {suggestedIds.map((rid) => {
-              const ref = referencePhotos.find((r) => r.id === rid);
-              if (!ref) return null;
+            {safeSuggested.map((id) => {
+              const reference = safePhotos.find((item) => item.id === id);
+              if (!reference) return null;
               return (
                 <span
-                  key={rid}
+                  key={id}
                   className="badge badge-locked"
-                  data-testid={`storyboard-suggested-${scene.scene_number}-${rid}`}
+                  title={reference.description || reference.fileName}
                 >
-                  <span className="badge-dot" />{refTypeLabel(ref.type)}
+                  <span className="badge-dot" />
+                  {refTypeLabel(reference.type)}
                 </span>
               );
             })}
@@ -754,113 +1001,102 @@ function StoryboardSceneCard({ scene, referencePhotos, onUpdateOverrides }) {
         </div>
       )}
 
-      {/* Override control */}
-      <div className="mt-4 pt-3 border-t border-white/5">
-        <div className="flex items-center justify-between mb-2">
-          <div className="overline text-neutral-500">
-            {isOverridden ? "Your Override (Active)" : "Manual Override"}
-          </div>
-          <div className="flex gap-2">
-            {isOverridden && (
-              <button
-                className="btn-ghost !py-1 !px-2 !text-[0.65rem]"
-                onClick={clearOverride}
-                data-testid={`storyboard-refs-clear-${scene.scene_number}`}
-              >
-                Reset
-              </button>
-            )}
-            {referencePhotos.length > 0 && (
-              <button
-                className="btn-ghost !py-1 !px-2 !text-[0.65rem]"
-                onClick={() => setEditing((e) => !e)}
-                data-testid={`storyboard-refs-edit-${scene.scene_number}`}
-              >
-                {editing ? "Done" : "Edit"}
-              </button>
-            )}
-          </div>
+      {!editing && safeSelected.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {safeSelected.map((id) => {
+            const reference = safePhotos.find((item) => item.id === id);
+            if (!reference) return null;
+            return (
+              <div key={id} className="border border-white/10 p-2">
+                {reference.imageDataUrl && (
+                  <img
+                    src={reference.imageDataUrl}
+                    alt={reference.fileName || "Reference"}
+                    className="w-full h-16 object-cover mb-2"
+                  />
+                )}
+                <div className="text-[0.65rem] uppercase tracking-widest text-[#E5B83B]">
+                  {refTypeLabel(reference.type)}
+                </div>
+                <div className="text-xs font-body text-neutral-400 truncate">
+                  {reference.fileName || reference.description || "Reference"}
+                </div>
+              </div>
+            );
+          })}
         </div>
+      )}
 
-        {/* Active reference pills */}
-        {!editing && (
-          activeIds.length === 0 ? (
+      {!editing && safeSelected.length === 0 && (
+        <div className="text-xs text-neutral-500 font-body">
+          0 references selected. Image generation will use the scene prompt only.
+        </div>
+      )}
+
+      {editing && (
+        <div
+          className="space-y-3 max-h-80 overflow-auto pr-1"
+          data-testid={`${testidPrefix}-refs-editor-${sceneNumber}`}
+        >
+          {safePhotos.length === 0 ? (
             <div className="text-xs text-neutral-500 font-body">
-              {referencePhotos.length === 0
-                ? "No reference photos uploaded in Stage 01."
-                : "No references active for this scene. Falls back to suggestions if any."}
+              Upload reference photos in Stage 01 first.
             </div>
           ) : (
-            <div className="flex flex-wrap gap-1">
-              {activeIds.map((rid) => {
-                const ref = referencePhotos.find((r) => r.id === rid);
-                if (!ref) return null;
-                return (
-                  <span
-                    key={rid}
-                    className="badge badge-ref-active"
-                    data-testid={`storyboard-active-${scene.scene_number}-${rid}`}
-                  >
-                    <span className="badge-dot" />{refTypeLabel(ref.type)}
-                  </span>
-                );
-              })}
-            </div>
-          )
-        )}
+            REFERENCE_TYPES.filter((type) => byType[type.id]?.length).map((type) => (
+              <div key={type.id}>
+                <div className="overline text-neutral-500 mb-1">{type.label}</div>
+                <div className="space-y-1">
+                  {byType[type.id].map((reference) => {
+                    const checked = safeSelected.includes(reference.id);
+                    const suggested = safeSuggested.includes(reference.id);
+                    return (
+                      <label
+                        key={reference.id}
+                        className={`flex items-center gap-3 p-2 border cursor-pointer transition-colors ${
+                          checked
+                            ? "border-[#8B5CF6]/70 bg-[#8B5CF6]/5"
+                            : "border-white/10 hover:border-white/25"
+                        }`}
+                        data-testid={`${testidPrefix}-ref-toggle-${sceneNumber}-${reference.id}`}
+                      >
+                        <input
+                          type="checkbox"
+                          className="accent-[#E5B83B]"
+                          checked={checked}
+                          onChange={() => toggleReference(reference.id)}
+                        />
 
-        {editing && (
-          <div
-            className="space-y-3 max-h-72 overflow-auto pr-1 mt-1"
-            data-testid={`storyboard-refs-editor-${scene.scene_number}`}
-          >
-            {referencePhotos.length === 0 ? (
-              <div className="text-xs text-neutral-500 font-body">
-                Upload reference photos in Stage 01 to override per-scene.
-              </div>
-            ) : (
-              REFERENCE_TYPES.filter((t) => byType[t.id]?.length).map((t) => (
-                <div key={t.id}>
-                  <div className="overline text-neutral-500 mb-1">{t.label}</div>
-                  <div className="space-y-1">
-                    {byType[t.id].map((ref) => {
-                      const on = (overrideIds ?? suggestedIds).includes(ref.id);
-                      return (
-                        <label
-                          key={ref.id}
-                          className={`flex items-center gap-3 p-2 border cursor-pointer transition-colors ${
-                            on ? "border-[#8B5CF6]/70 bg-[#8B5CF6]/5" : "border-white/10 hover:border-white/25"
-                          }`}
-                          data-testid={`storyboard-ref-toggle-${scene.scene_number}-${ref.id}`}
-                        >
-                          <input
-                            type="checkbox"
-                            className="accent-[#E5B83B]"
-                            checked={on}
-                            onChange={() => toggle(ref.id)}
+                        {reference.imageDataUrl && (
+                          <img
+                            src={reference.imageDataUrl}
+                            alt={reference.fileName || "Reference"}
+                            className="w-12 h-12 object-cover"
                           />
-                          {ref.imageDataUrl && (
-                            <img src={ref.imageDataUrl} alt={ref.fileName} className="w-10 h-10 object-cover" />
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <div className="text-xs text-neutral-500 truncate font-body">
-                              {ref.description || ref.fileName || "—"}
-                            </div>
+                        )}
+
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs text-neutral-200 truncate font-body">
+                            {reference.fileName || "Unnamed reference"}
                           </div>
-                        </label>
-                      );
-                    })}
-                  </div>
+                          <div className="text-[0.65rem] text-neutral-500 truncate font-body">
+                            {reference.description || refTypeLabel(reference.type)}
+                          </div>
+                        </div>
+
+                        {suggested && <span className="badge badge-locked">Suggested</span>}
+                      </label>
+                    );
+                  })}
                 </div>
-              ))
-            )}
-          </div>
-        )}
-      </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
-
 
 
 // ---------- Sub-components ----------
@@ -944,26 +1180,51 @@ function ScenePromptCard({ p, onEdit }) {
   );
 }
 
-function SceneImageCard({ scene, prompt, image, imageProviderReady, activeRefs, isOverridden, loading, onGenerate, onUpload, onApprove, onUnapprove, onRemove }) {
+function SceneImageCard({
+  scene,
+  prompt,
+  image,
+  imageProviderReady,
+  referencePhotos,
+  suggestedIds,
+  selectedIds,
+  selectionMode,
+  onUseSuggestions,
+  onUseNone,
+  onChangeSelected,
+  loading,
+  onGenerate,
+  onUpload,
+  onApprove,
+  onUnapprove,
+  onRemove,
+}) {
   const inputRef = useRef(null);
+
   return (
     <div className="bv-card p-4" data-testid={`scene-img-card-${scene.scene_number}`}>
       <div className="flex justify-between items-start mb-3">
         <div>
-          <div className="overline text-neutral-500">Scene {String(scene.scene_number).padStart(2, "0")}</div>
+          <div className="overline text-neutral-500">
+            Scene {String(scene.scene_number).padStart(2, "0")}
+          </div>
           <h4 className="font-display text-base uppercase mt-1">{scene.scene_title}</h4>
         </div>
         {image?.approved && <StatusBadge status="approved" />}
       </div>
+
       <div className="aspect-video bg-black border border-white/5 mb-3 overflow-hidden flex items-center justify-center">
         {image?.imageDataUrl ? (
-          <img src={image.imageDataUrl} alt={`Scene ${scene.scene_number}`} className="w-full h-full object-cover" />
+          <img
+            src={image.imageDataUrl}
+            alt={`Scene ${scene.scene_number}`}
+            className="w-full h-full object-cover"
+          />
         ) : (
           <ImageIcon className="w-8 h-8 text-neutral-700" strokeWidth={1.2} />
         )}
       </div>
 
-      {/* Provider label overlaid on image */}
       {image?.imageDataUrl && image?.sourceType === "generated_from_reference" && (
         <div className="-mt-3 mb-3">
           <span
@@ -975,88 +1236,120 @@ function SceneImageCard({ scene, prompt, image, imageProviderReady, activeRefs, 
           </span>
         </div>
       )}
+
       {image?.imageDataUrl && image?.sourceType === "manual_upload" && (
         <div className="-mt-3 mb-3">
           <span
             className="badge badge-locked"
             data-testid={`scene-img-source-manual-${scene.scene_number}`}
           >
-            <span className="badge-dot" />Manual upload
+            <span className="badge-dot" />
+            Manual upload
           </span>
         </div>
       )}
 
-      {/* Active refs display */}
-      <div className="mb-3">
-        <div className="overline text-neutral-500 mb-1">
-          References {isOverridden ? "(Override)" : "(Suggested)"}
-        </div>
-        {activeRefs && activeRefs.length > 0 ? (
-          <div
-            className="flex flex-wrap gap-1"
-            data-testid={`scene-img-refs-${scene.scene_number}`}
-          >
-            {activeRefs.map((r) => (
-              <span
-                key={r.id}
-                className="badge badge-ref-active"
-                data-testid={`scene-img-ref-${scene.scene_number}-${r.id}`}
-                title={r.description || r.fileName}
-              >
-                <span className="badge-dot" />{refTypeLabel(r.type)}
-              </span>
-            ))}
-          </div>
-        ) : (
-          <div className="text-xs text-neutral-500 font-body">
-            No references — generation will use prompt only.
-          </div>
-        )}
-      </div>
+      <SceneReferenceSelector
+        sceneNumber={scene.scene_number}
+        referencePhotos={referencePhotos}
+        suggestedIds={suggestedIds}
+        selectedIds={selectedIds}
+        selectionMode={selectionMode}
+        onUseSuggestions={onUseSuggestions}
+        onUseNone={onUseNone}
+        onChangeSelected={onChangeSelected}
+        testidPrefix="scene-img"
+      />
 
       {image && (
-        <div className="text-xs font-mono text-neutral-500 mb-3">
-          <div><span className="text-neutral-400">Source:</span> {image.sourceType === "manual_upload" ? "Manual upload" : `Generated · ${image.providerName || "provider"}`}</div>
+        <div className="text-xs font-mono text-neutral-500 my-3">
+          <div>
+            <span className="text-neutral-400">Source:</span>{" "}
+            {image.sourceType === "manual_upload"
+              ? "Manual upload"
+              : `Generated · ${image.providerName || "provider"}`}
+          </div>
         </div>
       )}
-      <div className="flex flex-wrap gap-2">
+
+      {prompt?.final_polished_prompt && (
+        <div className="text-xs font-mono text-neutral-500 mb-3 line-clamp-3">
+          {prompt.final_polished_prompt}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 mt-3">
         <input
           ref={inputRef}
           type="file"
           accept="image/*"
           className="hidden"
-          onChange={(e) => onUpload(e.target.files?.[0])}
+          onChange={(event) => {
+            onUpload(event.target.files?.[0]);
+            event.target.value = "";
+          }}
           data-testid={`scene-img-file-${scene.scene_number}`}
         />
+
         <button
+          type="button"
           className="btn-ghost inline-flex items-center gap-1"
           onClick={() => inputRef.current?.click()}
           data-testid={`scene-img-upload-${scene.scene_number}`}
         >
-          <Upload className="w-3 h-3" /> Upload
+          <Upload className="w-3 h-3" />
+          Upload
         </button>
+
         <button
+          type="button"
           className="btn-ghost inline-flex items-center gap-1"
           onClick={onGenerate}
           disabled={!imageProviderReady || loading}
           data-testid={`scene-img-generate-${scene.scene_number}`}
-          title={!imageProviderReady ? "Image provider is not connected" : "Generate from reference photos"}
+          title={
+            !imageProviderReady
+              ? GEMINI_UNAVAILABLE_MESSAGE
+              : `Generate using ${selectedIds.length} selected references`
+          }
         >
-          {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+          {loading ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <Sparkles className="w-3 h-3" />
+          )}
           Generate
         </button>
+
         {image && !image.approved && (
-          <button className="btn-gold" onClick={onApprove} data-testid={`scene-img-approve-${scene.scene_number}`}>
+          <button
+            type="button"
+            className="btn-gold"
+            onClick={onApprove}
+            data-testid={`scene-img-approve-${scene.scene_number}`}
+          >
             Approve
           </button>
         )}
+
         {image?.approved && (
-          <button className="btn-ghost" onClick={onUnapprove} data-testid={`scene-img-unapprove-${scene.scene_number}`}>
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={onUnapprove}
+            data-testid={`scene-img-unapprove-${scene.scene_number}`}
+          >
             Unapprove
           </button>
         )}
+
         {image && (
-          <button className="btn-danger" onClick={onRemove} data-testid={`scene-img-remove-${scene.scene_number}`}>
+          <button
+            type="button"
+            className="btn-danger"
+            onClick={onRemove}
+            data-testid={`scene-img-remove-${scene.scene_number}`}
+          >
             Remove
           </button>
         )}
