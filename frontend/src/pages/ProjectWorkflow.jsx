@@ -38,6 +38,9 @@ const FALLBACK_REASON_LABELS = {
 const GEMINI_UNAVAILABLE_MESSAGE =
   "Gemini Nano Banana image generation is unavailable or blocked by budget. Upload manually or try again later.";
 
+const FREE_TEST_UNAVAILABLE_MESSAGE =
+  "Pollinations test image generation is unavailable. Manual upload remains available.";
+
 function FallbackBanner({ data, onRetry, testid }) {
   if (!data || !data._fallback) return null;
   const label = FALLBACK_REASON_LABELS[data._fallback_reason] || "LLM unavailable";
@@ -160,7 +163,11 @@ export default function ProjectWorkflow() {
     setLoading((l) => ({ ...l, [k]: v }));
   }
 
-  const imageProviderReady = providerStatus?.image_generation?.connected;
+  const imageProviderReady =
+    providerStatus?.image_generation?.connected;
+  const freeTestProviderActive =
+    providerStatus?.image_generation?.mode ===
+    "prompt_guided_test";
 
   if (!project) return null;
 
@@ -367,7 +374,11 @@ export default function ProjectWorkflow() {
 
   async function doGenerateSceneImage(sceneNumber) {
     if (!imageProviderReady) {
-      toast.error(GEMINI_UNAVAILABLE_MESSAGE);
+      toast.error(
+        freeTestProviderActive
+          ? FREE_TEST_UNAVAILABLE_MESSAGE
+          : GEMINI_UNAVAILABLE_MESSAGE
+      );
       return;
     }
     setLoad(`img-${sceneNumber}`, true);
@@ -393,14 +404,30 @@ export default function ProjectWorkflow() {
         approved: false,
         providerName: data.providerName,
         generatedAt: data.createdAt,
-        referencePhotoIdsUsed: data.referencePhotoIdsUsed,
+        referencePhotoIdsUsed:
+          data.referencePhotoIdsUsed || [],
+        referenceMode:
+          data.referenceMode ||
+          "direct_reference_images",
       };
       persist({ sceneImages });
       toast.success(`Scene ${sceneNumber} image generated`);
     } catch (e) {
       const status = e.response?.status;
 
-      if (!e.response || [402, 429, 502, 503, 504].includes(status)) {
+      if (
+        freeTestProviderActive &&
+        (!e.response ||
+          [401, 402, 429, 502, 503, 504].includes(status))
+      ) {
+        toast.error(
+          e.response?.data?.detail ||
+            FREE_TEST_UNAVAILABLE_MESSAGE
+        );
+      } else if (
+        !e.response ||
+        [402, 429, 502, 503, 504].includes(status)
+      ) {
         toast.error(GEMINI_UNAVAILABLE_MESSAGE);
       } else {
         toast.error(
@@ -463,7 +490,18 @@ export default function ProjectWorkflow() {
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="badge badge-locked"><span className="badge-dot" />{styleLabel(project.style)}</span>
             <span className="badge badge-ref-active"><span className="badge-dot" />{(project.referencePhotos || []).length} References</span>
-            {providerStatus && !imageProviderReady && <StatusBadge status="provider_missing" label="Image Provider Missing" />}
+            {providerStatus && !imageProviderReady && (
+              <StatusBadge
+                status="provider_missing"
+                label="Image Provider Missing"
+              />
+            )}
+            {freeTestProviderActive && imageProviderReady && (
+              <StatusBadge
+                status="demo"
+                label="Free Test Image Provider"
+              />
+            )}
           </div>
         </div>
         <button className="btn-ghost" onClick={() => nav("/dashboard")} data-testid="workflow-back">
@@ -755,6 +793,23 @@ export default function ProjectWorkflow() {
           </div>
         ) : (
           <>
+            {freeTestProviderActive && imageProviderReady && (
+              <div
+                className="mb-5 bv-card p-4 border-[#8B5CF6]/40"
+                data-testid="free-test-provider-banner"
+              >
+                <div className="overline text-[#C4B5FD]">
+                  Pollinations Test Provider Active
+                </div>
+                <p className="mt-2 font-body text-sm text-neutral-300">
+                  This produces real prompt-generated test images. Selected
+                  references guide the written prompt through their type,
+                  filename, and description. Their actual image pixels are not
+                  sent to Pollinations in this test mode.
+                </p>
+              </div>
+            )}
+
             {providerStatus && !imageProviderReady && (
               <div className="mb-5 bv-card p-4 border-orange-500/30">
                 <div className="flex items-center gap-2">
