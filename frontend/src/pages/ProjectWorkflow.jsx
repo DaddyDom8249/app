@@ -39,7 +39,7 @@ const GEMINI_UNAVAILABLE_MESSAGE =
   "Gemini Nano Banana image generation is unavailable or blocked by budget. Upload manually or try again later.";
 
 const FREE_TEST_UNAVAILABLE_MESSAGE =
-  "Pollinations test image generation is unavailable. Manual upload remains available.";
+  "Cloudflare free test image generation is unavailable. Manual upload remains available.";
 
 function FallbackBanner({ data, onRetry, testid }) {
   if (!data || !data._fallback) return null;
@@ -799,13 +799,13 @@ export default function ProjectWorkflow() {
                 data-testid="free-test-provider-banner"
               >
                 <div className="overline text-[#C4B5FD]">
-                  Pollinations Test Provider Active
+                  Cloudflare Free Test Provider Active
                 </div>
                 <p className="mt-2 font-body text-sm text-neutral-300">
                   This produces real prompt-generated test images. Selected
                   references guide the written prompt through their type,
                   filename, and description. Their actual image pixels are not
-                  sent to Pollinations in this test mode.
+                  sent to Cloudflare in this test mode.
                 </p>
               </div>
             )}
