@@ -1,0 +1,88 @@
+name: BeatVision PR Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "frontend/**"
+      - "backend/worker_proxy_server.py"
+      - "cloudflare-worker/**"
+      - "scripts/start-worker-backed-local.sh"
+      - ".github/workflows/beatvision-pr-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beatvision-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Worker and frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Cloudflare Worker source
+        run: |
+          node --check cloudflare-worker/src/index.js
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          files = [
+              Path("cloudflare-worker/package.json"),
+              Path("cloudflare-worker/wrangler.jsonc"),
+          ]
+
+          for path in files:
+              json.loads(path.read_text(encoding="utf-8"))
+              print(f"PASS: {path}")
+          PY
+
+      - name: Validate local Worker proxy
+        run: |
+          python -m py_compile backend/worker_proxy_server.py
+          bash -n scripts/start-worker-backed-local.sh
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+
+      - name: Apply CRA AJV compatibility repair
+        working-directory: frontend
+        run: |
+          npm install \
+            --no-save \
+            --package-lock=false \
+            --legacy-peer-deps \
+            ajv@8.17.1 \
+            ajv-keywords@5.1.0 \
+            schema-utils@4.2.0
+
+      - name: Build BeatVision frontend
+        working-directory: frontend
+        env:
+          CI: "true"
+          GENERATE_SOURCEMAP: "false"
+          REACT_APP_BACKEND_URL: "http://127.0.0.1:8000"
+          REACT_APP_IMAGE_TEST_URL: "http://127.0.0.1:8001"
+        run: npm run build
