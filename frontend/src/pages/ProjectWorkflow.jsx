@@ -165,9 +165,11 @@ export default function ProjectWorkflow() {
 
   const imageProviderReady =
     providerStatus?.image_generation?.connected;
-  const freeTestProviderActive =
-    providerStatus?.image_generation?.mode ===
-    "prompt_guided_test";
+  const imageProviderMode =
+    providerStatus?.image_generation?.mode;
+  const promptGuidedProviderActive =
+    imageProviderMode === "prompt_guided_test" ||
+    imageProviderMode === "worker_ai_binding";
 
   if (!project) return null;
 
@@ -375,7 +377,7 @@ export default function ProjectWorkflow() {
   async function doGenerateSceneImage(sceneNumber) {
     if (!imageProviderReady) {
       toast.error(
-        freeTestProviderActive
+        promptGuidedProviderActive
           ? FREE_TEST_UNAVAILABLE_MESSAGE
           : GEMINI_UNAVAILABLE_MESSAGE
       );
@@ -416,7 +418,7 @@ export default function ProjectWorkflow() {
       const status = e.response?.status;
 
       if (
-        freeTestProviderActive &&
+        promptGuidedProviderActive &&
         (!e.response ||
           [401, 402, 429, 502, 503, 504].includes(status))
       ) {
@@ -496,7 +498,7 @@ export default function ProjectWorkflow() {
                 label="Image Provider Missing"
               />
             )}
-            {freeTestProviderActive && imageProviderReady && (
+            {promptGuidedProviderActive && imageProviderReady && (
               <StatusBadge
                 status="demo"
                 label="Free Test Image Provider"
@@ -793,7 +795,7 @@ export default function ProjectWorkflow() {
           </div>
         ) : (
           <>
-            {freeTestProviderActive && imageProviderReady && (
+            {promptGuidedProviderActive && imageProviderReady && (
               <div
                 className="mb-5 bv-card p-4 border-[#8B5CF6]/40"
                 data-testid="free-test-provider-banner"

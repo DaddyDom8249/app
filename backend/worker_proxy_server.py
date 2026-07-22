@@ -26,6 +26,11 @@ WORKER_KEY = os.environ.get(
 
 MAX_BODY_BYTES = 20 * 1024 * 1024
 
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+}
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "BeatVisionWorkerProxy/1.0"
@@ -40,11 +45,33 @@ class Handler(BaseHTTPRequestHandler):
             flush=True,
         )
 
-    def add_cors(self) -> None:
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "*",
+    def request_origin(self) -> str:
+        return self.headers.get(
+            "Origin",
+            "",
+        ).strip()
+
+    def origin_allowed(self) -> bool:
+        origin = self.request_origin()
+
+        return (
+            not origin or
+            origin in ALLOWED_ORIGINS
         )
+
+    def add_cors(self) -> None:
+        origin = self.request_origin()
+
+        if origin in ALLOWED_ORIGINS:
+            self.send_header(
+                "Access-Control-Allow-Origin",
+                origin,
+            )
+            self.send_header(
+                "Vary",
+                "Origin",
+            )
+
         self.send_header(
             "Access-Control-Allow-Headers",
             "Content-Type",
@@ -91,6 +118,16 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_OPTIONS(self) -> None:
+        if not self.origin_allowed():
+            self.send_json(
+                403,
+                {
+                    "detail":
+                        "Origin not allowed."
+                },
+            )
+            return
+
         self.send_response(204)
         self.add_cors()
         self.end_headers()
@@ -102,6 +139,16 @@ class Handler(BaseHTTPRequestHandler):
         self.forward("POST")
 
     def forward(self, method: str) -> None:
+        if not self.origin_allowed():
+            self.send_json(
+                403,
+                {
+                    "detail":
+                        "Origin not allowed."
+                },
+            )
+            return
+
         if not WORKER_URL or not WORKER_KEY:
             self.send_json(
                 503,
