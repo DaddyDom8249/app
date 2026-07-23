@@ -28,11 +28,15 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,28 +59,178 @@ jobs:
               print(f"PASS: {path}")
           PY
 
-      - name: Validate local Worker proxy
+      - name: Validate proxy and startup syntax
         run: |
           python -m py_compile backend/worker_proxy_server.py
           bash -n scripts/start-worker-backed-local.sh
 
+      - name: Smoke-test local Worker proxy
+        run: |
+          set -Eeuo pipefail
+
+          TMP_DIR="$(mktemp -d)"
+          MOCK_PID=""
+          PROXY_PID=""
+
+          cleanup() {
+            [ -z "$PROXY_PID" ] || kill "$PROXY_PID" 2>/dev/null || true
+            [ -z "$MOCK_PID" ] || kill "$MOCK_PID" 2>/dev/null || true
+            rm -rf "$TMP_DIR"
+          }
+
+          trap cleanup EXIT
+
+          cat > "$TMP_DIR/mock_worker.py" <<'PY'
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          import json
+
+
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, *_args):
+                  return
+
+              def send_json(self, status, payload):
+                  body = json.dumps(payload).encode("utf-8")
+                  self.send_response(status)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def authorized(self):
+                  return (
+                      self.headers.get("X-BeatVision-Key")
+                      == "ci-test-key"
+                  )
+
+              def do_GET(self):
+                  if not self.authorized():
+                      self.send_json(403, {"detail": "bad key"})
+                      return
+
+                  self.send_json(
+                      200,
+                      {
+                          "status": "ok",
+                          "aiBindingConfigured": True,
+                          "accessKeyConfigured": True,
+                      },
+                  )
+
+              def do_POST(self):
+                  if not self.authorized():
+                      self.send_json(403, {"detail": "bad key"})
+                      return
+
+                  length = int(
+                      self.headers.get("Content-Length", "0")
+                  )
+                  raw = self.rfile.read(length)
+                  payload = json.loads(raw.decode("utf-8"))
+
+                  self.send_json(
+                      200,
+                      {
+                          "authenticated": True,
+                          "receivedScenePrompt":
+                              payload.get("scenePrompt"),
+                      },
+                  )
+
+
+          ThreadingHTTPServer(
+              ("127.0.0.1", 18080),
+              Handler,
+          ).serve_forever()
+          PY
+
+          python "$TMP_DIR/mock_worker.py" \
+            > "$TMP_DIR/mock.log" \
+            2>&1 &
+          MOCK_PID=$!
+
+          BEATVISION_WORKER_URL="http://127.0.0.1:18080" \
+          BEATVISION_WORKER_KEY="ci-test-key" \
+          python backend/worker_proxy_server.py \
+            > "$TMP_DIR/proxy.log" \
+            2>&1 &
+          PROXY_PID=$!
+
+          for _ in $(seq 1 40); do
+            if curl \
+              -fsS \
+              -H "Origin: http://127.0.0.1:3000" \
+              http://127.0.0.1:8001/api/health \
+              > "$TMP_DIR/health.json"
+            then
+              break
+            fi
+
+            sleep 0.25
+          done
+
+          HEALTH="$(cat "$TMP_DIR/health.json")"
+
+          python - "$HEALTH" <<'PY'
+          import json
+          import sys
+
+          payload = json.loads(sys.argv[1])
+
+          assert payload["status"] == "ok"
+          assert payload["aiBindingConfigured"] is True
+          assert payload["accessKeyConfigured"] is True
+          PY
+
+          HEADERS="$(
+            curl \
+              -sS \
+              -D - \
+              -o /dev/null \
+              -H "Origin: http://127.0.0.1:3000" \
+              http://127.0.0.1:8001/api/health
+          )"
+
+          printf '%s\n' "$HEADERS" |
+            tr -d '\r' |
+            grep -qi \
+              '^Access-Control-Allow-Origin: http://127.0.0.1:3000$'
+
+          FOREIGN_CODE="$(
+            curl \
+              -sS \
+              -o /dev/null \
+              -w '%{http_code}' \
+              -H "Origin: https://example.invalid" \
+              http://127.0.0.1:8001/api/health
+          )"
+
+          [ "$FOREIGN_CODE" = "403" ]
+
+          GENERATED="$(
+            curl \
+              -fsS \
+              -H "Origin: http://127.0.0.1:3000" \
+              -H "Content-Type: application/json" \
+              -d '{"scenePrompt":"CI proxy test"}' \
+              http://127.0.0.1:8001/api/generate-scene-image
+          )"
+
+          python - "$GENERATED" <<'PY'
+          import json
+          import sys
+
+          payload = json.loads(sys.argv[1])
+
+          assert payload["authenticated"] is True
+          assert payload["receivedScenePrompt"] == "CI proxy test"
+          PY
+
+          echo "Proxy runtime smoke test: PASS"
+
       - name: Install frontend dependencies
         working-directory: frontend
-        run: |
-          npm install \
-            --legacy-peer-deps \
-            --package-lock=false
-
-      - name: Apply CRA AJV compatibility repair
-        working-directory: frontend
-        run: |
-          npm install \
-            --no-save \
-            --package-lock=false \
-            --legacy-peer-deps \
-            ajv@8.17.1 \
-            ajv-keywords@5.1.0 \
-            schema-utils@4.2.0
+        run: npm ci --legacy-peer-deps
 
       - name: Build BeatVision frontend
         working-directory: frontend

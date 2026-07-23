@@ -117,6 +117,7 @@ export default function ProjectWorkflow() {
   const [project, setProject] = useState(null);
   const [loading, setLoading] = useState({});
   const [providerStatus, setProviderStatus] = useState(null);
+  const projectRef = useRef(null);
 
   useEffect(() => {
     const p = getProject(id);
@@ -125,38 +126,43 @@ export default function ProjectWorkflow() {
       nav("/dashboard");
       return;
     }
+    projectRef.current = p;
     setProject(p);
-    fetchProviderStatus().then(setProviderStatus).catch(() => setProviderStatus(null));
+    fetchProviderStatus()
+      .then(setProviderStatus)
+      .catch(() => setProviderStatus(null));
   }, [id, nav]);
 
   function persist(patch) {
-    setProject((prev) => {
-      const next = { ...prev, ...patch };
+    const current = projectRef.current || project;
+    if (!current) return;
 
-      try {
-        upsertProject(next);
-      } catch (error) {
-        console.error("Project persistence failed", error);
+    const next = { ...current, ...patch };
 
-        if (
-          error instanceof StorageQuotaError ||
-          error?.code === "BEATVISION_STORAGE_QUOTA"
-        ) {
-          toast.error(
-            "Browser storage is full. Remove large reference or scene images before adding more."
-          );
-          toast.warning(
-            "The latest change is visible now, but it may not survive a page refresh."
-          );
-        } else {
-          toast.error(
-            "The latest project change could not be saved to browser storage."
-          );
-        }
+    projectRef.current = next;
+    setProject(next);
+
+    try {
+      upsertProject(next);
+    } catch (error) {
+      console.error("Project persistence failed", error);
+
+      if (
+        error instanceof StorageQuotaError ||
+        error?.code === "BEATVISION_STORAGE_QUOTA"
+      ) {
+        toast.error(
+          "Browser storage is full. Remove large reference or scene images before adding more."
+        );
+        toast.warning(
+          "The latest change is visible now, but it may not survive a page refresh."
+        );
+      } else {
+        toast.error(
+          "The latest project change could not be saved to browser storage."
+        );
       }
-
-      return next;
-    });
+    }
   }
 
   function setLoad(k, v) {
@@ -261,7 +267,17 @@ export default function ProjectWorkflow() {
       const fb = data._fallback
         ? { _fallback: true, _fallback_reason: data._fallback_reason, _fallback_message: data._fallback_message }
         : null;
-      persist({ storyboardScenes: data.scenes, storyboardFallback: fb, storyboardApproved: false });
+      persist({
+        storyboardScenes: data.scenes,
+        storyboardFallback: fb,
+        storyboardApproved: false,
+        sceneReferencePhotoIds: {},
+        scenePrompts: null,
+        scenePromptsFallback: null,
+        scenePromptsApproved: false,
+        sceneImages: {},
+        motionPlan: null,
+      });
       if (fb) toast.warning("Storyboard: demo fallback generated (Claude unavailable)");
       else toast.success("Storyboard generated (8 scenes)");
     } catch (e) {

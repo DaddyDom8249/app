@@ -16,6 +16,8 @@ const imageClient = axios.create({
   timeout: 210000,
 });
 
+let imageTestAvailable = Boolean(IMAGE_TEST_URL);
+
 function projectContext(project) {
   const lyrics = (project.lyrics || "").slice(0, 1200);
   const notes = (project.notes || "").slice(0, 500);
@@ -39,11 +41,13 @@ export async function fetchProviderStatus() {
   const { data: primaryStatus } = await client.get("/provider-status");
 
   if (!IMAGE_TEST_URL) {
+    imageTestAvailable = false;
     return primaryStatus;
   }
 
   try {
     const { data: imageStatus } = await imageClient.get("/provider-status");
+    imageTestAvailable = true;
 
     return {
       ...primaryStatus,
@@ -55,6 +59,7 @@ export async function fetchProviderStatus() {
         primaryStatus.reference_photo_image_generation,
     };
   } catch (error) {
+    imageTestAvailable = false;
     console.warn("Free image test provider is unavailable", error);
     return primaryStatus;
   }
@@ -109,9 +114,14 @@ export async function generateSceneImage({
   environmentConsistencyNotes,
   referenceImages,
 }) {
-  const promptGuidedTest = Boolean(IMAGE_TEST_URL);
+  const useImageTestProvider = Boolean(
+    IMAGE_TEST_URL && imageTestAvailable
+  );
+  const selectedClient = useImageTestProvider
+    ? imageClient
+    : client;
 
-  const { data } = await imageClient.post("/generate-scene-image", {
+  const { data } = await selectedClient.post("/generate-scene-image", {
     projectId,
     sceneId,
     scenePrompt,
@@ -126,7 +136,7 @@ export async function generateSceneImage({
       type: reference.type,
       description: reference.description || "",
       fileName: reference.fileName || "",
-      imageDataUrl: promptGuidedTest
+      imageDataUrl: useImageTestProvider
         ? undefined
         : reference.imageDataUrl,
     })),
