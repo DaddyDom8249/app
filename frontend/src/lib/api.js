@@ -1,38 +1,75 @@
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const IMAGE_TEST_URL = process.env.REACT_APP_IMAGE_TEST_URL || "";
+
 export const API = `${BACKEND_URL}/api`;
+const IMAGE_API = IMAGE_TEST_URL ? `${IMAGE_TEST_URL}/api` : API;
 
-const client = axios.create({ baseURL: API, timeout: 120000 });
+const client = axios.create({
+  baseURL: API,
+  timeout: 120000,
+});
 
-function projectContext(p) {
-  // Keep only lightweight metadata for text-generation calls.
-  // Full base64 image data is sent ONLY to /generate-scene-image (Gemini) on user click.
-  const lyrics = (p.lyrics || "").slice(0, 1200);
-  const notes = (p.notes || "").slice(0, 500);
+const imageClient = axios.create({
+  baseURL: IMAGE_API,
+  timeout: 210000,
+});
+
+let imageTestAvailable = Boolean(IMAGE_TEST_URL);
+
+function projectContext(project) {
+  const lyrics = (project.lyrics || "").slice(0, 1200);
+  const notes = (project.notes || "").slice(0, 500);
+
   return {
-    title: (p.title || "").slice(0, 120),
-    artist: (p.artist || "").slice(0, 80),
+    title: (project.title || "").slice(0, 120),
+    artist: (project.artist || "").slice(0, 80),
     lyrics,
-    style: p.style,
+    style: project.style,
     notes,
-    referencePhotos: (p.referencePhotos || []).map((r) => ({
-      id: r.id,
-      type: r.type,
-      description: (r.description || "").slice(0, 160),
-      fileName: (r.fileName || "").slice(0, 80),
-      // NO imageDataUrl for text generation.
+    referencePhotos: (project.referencePhotos || []).map((reference) => ({
+      id: reference.id,
+      type: reference.type,
+      description: (reference.description || "").slice(0, 160),
+      fileName: (reference.fileName || "").slice(0, 80),
     })),
   };
 }
 
 export async function fetchProviderStatus() {
-  const { data } = await client.get("/provider-status");
-  return data;
+  const { data: primaryStatus } = await client.get("/provider-status");
+
+  if (!IMAGE_TEST_URL) {
+    imageTestAvailable = false;
+    return primaryStatus;
+  }
+
+  try {
+    const { data: imageStatus } = await imageClient.get("/provider-status");
+    imageTestAvailable = true;
+
+    return {
+      ...primaryStatus,
+      image_generation:
+        imageStatus.image_generation ||
+        primaryStatus.image_generation,
+      reference_photo_image_generation:
+        imageStatus.reference_photo_image_generation ||
+        primaryStatus.reference_photo_image_generation,
+    };
+  } catch (error) {
+    imageTestAvailable = false;
+    console.warn("Free image test provider is unavailable", error);
+    return primaryStatus;
+  }
 }
 
 export async function generateWorldReport(project) {
-  const { data } = await client.post("/generate-world-report", projectContext(project));
+  const { data } = await client.post(
+    "/generate-world-report",
+    projectContext(project)
+  );
   return data;
 }
 
@@ -77,21 +114,33 @@ export async function generateSceneImage({
   environmentConsistencyNotes,
   referenceImages,
 }) {
-  const { data } = await client.post("/generate-scene-image", {
+  const useImageTestProvider = Boolean(
+    IMAGE_TEST_URL && imageTestAvailable
+  );
+  const selectedClient = useImageTestProvider
+    ? imageClient
+    : client;
+
+  const { data } = await selectedClient.post("/generate-scene-image", {
     projectId,
     sceneId,
     scenePrompt,
     stylePreset,
     negativePrompt: negativePrompt || "",
-    characterConsistencyNotes: characterConsistencyNotes || "",
-    environmentConsistencyNotes: environmentConsistencyNotes || "",
-    referenceImages: (referenceImages || []).map((r) => ({
-      id: r.id,
-      type: r.type,
-      description: r.description || "",
-      fileName: r.fileName || "",
-      imageDataUrl: r.imageDataUrl, // required for image gen
+    characterConsistencyNotes:
+      characterConsistencyNotes || "",
+    environmentConsistencyNotes:
+      environmentConsistencyNotes || "",
+    referenceImages: (referenceImages || []).map((reference) => ({
+      id: reference.id,
+      type: reference.type,
+      description: reference.description || "",
+      fileName: reference.fileName || "",
+      imageDataUrl: useImageTestProvider
+        ? undefined
+        : reference.imageDataUrl,
     })),
   });
+
   return data;
 }
