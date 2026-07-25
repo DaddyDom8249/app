@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState, useRef } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getProject, upsertProject, fileToDataUrl, StorageQuotaError } from "@/lib/storage";
-import { styleLabel, refTypeLabel, REFERENCE_TYPES, MOTION_TYPES } from "@/lib/constants";
+import { styleLabel, refTypeLabel, REFERENCE_TYPES } from "@/lib/constants";
 import {
   generateWorldReport,
   generateWorldAssets,
@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import ReferencePhotoUploader from "@/components/ReferencePhotoUploader";
 import StatusBadge from "@/components/StatusBadge";
+import MotionExportPanel from "@/components/MotionExportPanel";
 import { toast } from "sonner";
 import {
   RefreshCw,
@@ -1428,71 +1429,5 @@ function SceneImageCard({
         )}
       </div>
     </div>
-  );
-}
-
-function MotionExportPanel({ project, approvedImagesCount, missingImagesCount, totalScenes }) {
-  const [showPlan, setShowPlan] = useState(false);
-  const suggestedMotion = useMemo(() => {
-    return (project.storyboardScenes || []).map((s, i) => ({
-      scene_number: s.scene_number,
-      scene_title: s.scene_title,
-      motion: MOTION_TYPES[i % MOTION_TYPES.length],
-      approved: !!project.sceneImages?.[s.scene_number]?.approved,
-    }));
-  }, [project.storyboardScenes, project.sceneImages]);
-
-  const complete = approvedImagesCount === totalScenes && totalScenes > 0;
-
-  return (
-    <>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bv-card p-4">
-          <div className="overline text-neutral-500">Approved Scene Images</div>
-          <div className="font-display text-4xl text-[#34D399] mt-2">{approvedImagesCount}</div>
-        </div>
-        <div className="bv-card p-4">
-          <div className="overline text-neutral-500">Missing Scene Images</div>
-          <div className="font-display text-4xl text-[#F87171] mt-2">{missingImagesCount}</div>
-        </div>
-        <div className="bv-card p-4">
-          <div className="overline text-neutral-500">Status</div>
-          <div className="font-display text-xl mt-2 uppercase">
-            {complete ? "Ready for future motion render." : "Partial preview only."}
-          </div>
-        </div>
-      </div>
-
-      <div className="space-y-2 mb-6">
-        {suggestedMotion.map((m) => (
-          <div key={m.scene_number} className="flex items-center justify-between border-b border-white/5 py-2 text-sm font-body">
-            <span className="font-mono text-neutral-500">S{String(m.scene_number).padStart(2, "0")}</span>
-            <span className="flex-1 mx-4 truncate">{m.scene_title}</span>
-            <span className="text-[#E5B83B] font-mono uppercase text-xs tracking-widest">{m.motion}</span>
-            {m.approved ? <StatusBadge status="approved" label="OK" /> : <StatusBadge status="missing" label="No image" />}
-          </div>
-        ))}
-      </div>
-
-      <button className="btn-gold" onClick={() => setShowPlan(true)} data-testid="preview-export-plan">
-        Preview Export Plan
-      </button>
-
-      {showPlan && (
-        <div className="mt-6 bv-card p-5" data-testid="export-plan-summary">
-          <div className="overline text-neutral-500 mb-2">Export Plan Summary</div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm font-body">
-            <div><span className="text-neutral-500">Song:</span> {project.title}</div>
-            <div><span className="text-neutral-500">Total Scenes:</span> {totalScenes}</div>
-            <div><span className="text-neutral-500">Approved Images:</span> {approvedImagesCount}</div>
-            <div><span className="text-neutral-500">Suggested Transitions:</span> {suggestedMotion.map((m) => m.motion).join(", ")}</div>
-          </div>
-          <div className="mt-4 pt-4 border-t border-white/5 text-xs font-mono text-neutral-400">
-            Future renderer requirement: Full MP4 rendering will be added later using many short clips
-            stitched into one final video.
-          </div>
-        </div>
-      )}
-    </>
   );
 }
