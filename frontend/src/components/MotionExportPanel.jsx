@@ -18,6 +18,9 @@ import {
 import { MOTION_TYPES } from "@/lib/constants";
 import StatusBadge from "@/components/StatusBadge";
 import {
+  DEFAULT_RENDER_PRESET_ID,
+  RENDER_PRESETS,
+  estimateOutputBytes,
   getVideoRenderSupport,
   renderVideo,
   VideoRenderCancelledError,
@@ -36,6 +39,18 @@ const PROGRESS_LABELS = {
   finalizing: "Finalizing video",
   complete: "Complete",
 };
+
+const RENDER_PRESET_STORAGE_KEY = "beatvision:render-preset";
+
+function readStoredRenderPreset() {
+  if (typeof window === "undefined") return DEFAULT_RENDER_PRESET_ID;
+  try {
+    const stored = window.localStorage.getItem(RENDER_PRESET_STORAGE_KEY);
+    return RENDER_PRESETS[stored] ? stored : DEFAULT_RENDER_PRESET_ID;
+  } catch {
+    return DEFAULT_RENDER_PRESET_ID;
+  }
+}
 
 function formatSeconds(value) {
   if (!Number.isFinite(value)) return "--:--";
@@ -126,6 +141,7 @@ export default function MotionExportPanel({
   const [renderError, setRenderError] = useState("");
   const [renderResult, setRenderResult] = useState(null);
   const [videoUrl, setVideoUrl] = useState("");
+  const [renderPresetId, setRenderPresetId] = useState(readStoredRenderPreset);
   const cancelRef = useRef(false);
   const mountedRef = useRef(true);
   const videoUrlRef = useRef("");
@@ -133,6 +149,17 @@ export default function MotionExportPanel({
   const audioSelectionIdRef = useRef(0);
 
   const browserSupport = useMemo(() => getVideoRenderSupport(), []);
+  const selectedPreset =
+    RENDER_PRESETS[renderPresetId] ||
+    RENDER_PRESETS[DEFAULT_RENDER_PRESET_ID];
+  const estimatedBytes = useMemo(
+    () => estimateOutputBytes(audioDuration, renderPresetId),
+    [audioDuration, renderPresetId]
+  );
+  const isLikelyMobile = useMemo(() => {
+    if (typeof navigator === "undefined") return false;
+    return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "");
+  }, []);
 
   const scenes = useMemo(() => {
     return [...(project.storyboardScenes || [])]
@@ -158,6 +185,14 @@ export default function MotionExportPanel({
   };
 
   const canRender = Object.values(requirements).every(Boolean) && !isRendering;
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RENDER_PRESET_STORAGE_KEY, renderPresetId);
+    } catch {
+      // The preset is a convenience only; rendering still works without storage.
+    }
+  }, [renderPresetId]);
 
   useEffect(() => {
     // React StrictMode runs an extra setup/cleanup cycle in development.
@@ -249,6 +284,7 @@ export default function MotionExportPanel({
         audioFile,
         projectTitle: project.title,
         scenes,
+        renderPreset: renderPresetId,
         shouldCancel: () => cancelRef.current || !mountedRef.current,
         onProgress: (nextProgress) => {
           if (mountedRef.current) setProgress(nextProgress);
@@ -348,6 +384,65 @@ export default function MotionExportPanel({
       </div>
 
       <div className="bv-card p-5">
+        <div className="overline text-neutral-500">Export quality</div>
+        <div className="font-display text-xl mt-1">Choose a render preset</div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+          {Object.values(RENDER_PRESETS).map((preset) => {
+            const selected = preset.id === renderPresetId;
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                className={`text-left border p-4 transition-colors ${
+                  selected
+                    ? "border-[#E5B83B] bg-[#E5B83B]/10"
+                    : "border-white/10 bg-black/20 hover:border-white/25"
+                }`}
+                onClick={() => {
+                  clearRenderedVideo();
+                  setRenderPresetId(preset.id);
+                }}
+                disabled={isRendering}
+                data-testid={`render-preset-${preset.id}`}
+              >
+                <span className="font-display text-lg">{preset.label}</span>
+                <span className="block font-mono text-xs text-neutral-500 mt-2">
+                  {preset.width} × {preset.height} · {preset.fps} FPS
+                </span>
+                <span className="block font-body text-xs text-neutral-400 mt-2">
+                  {preset.id === "mobile"
+                    ? "Best for phones and long songs."
+                    : preset.id === "standard"
+                      ? "Recommended balance of quality and smoothness."
+                      : "Best quality for faster desktop computers."}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs font-mono text-neutral-500">
+          <span>Selected: {selectedPreset.label}</span>
+          <span>
+            Estimated size:{" "}
+            {Number.isFinite(audioDuration) && audioDuration > 0
+              ? `about ${formatBytes(estimatedBytes)}`
+              : "select a song"}
+          </span>
+        </div>
+
+        {renderPresetId === "high" && isLikelyMobile && (
+          <div className="mt-4 p-4 border border-[#FDBA74]/35 bg-[#F97316]/5 flex gap-3">
+            <AlertTriangle className="w-5 h-5 text-[#FDBA74] shrink-0" />
+            <div className="font-body text-sm text-neutral-300">
+              High mode can drop frames or freeze during long renders on phones.
+              Standard or Mobile is recommended on this device.
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="bv-card p-5">
         <div className="overline text-neutral-500 mb-4">Export requirements</div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <Requirement ok={requirements.hasScenes}>Storyboard scenes are available.</Requirement>
@@ -413,7 +508,7 @@ export default function MotionExportPanel({
               </div>
             ))}
             <div className="pt-3 text-xs font-mono text-neutral-500">
-              Output: 1280 × 720 WebM · 30 FPS · cinematic cover crop · scene crossfades
+              Output: {selectedPreset.width} × {selectedPreset.height} WebM · {selectedPreset.fps} FPS · cinematic cover crop · scene crossfades
             </div>
           </div>
         )}
@@ -483,10 +578,11 @@ export default function MotionExportPanel({
             data-testid="generated-video-preview"
           />
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono text-neutral-400">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs font-mono text-neutral-400">
             <div><span className="block text-neutral-600">Duration</span>{formatSeconds(renderResult.duration)}</div>
             <div><span className="block text-neutral-600">Scenes</span>{renderResult.sceneCount}</div>
             <div><span className="block text-neutral-600">Size</span>{formatBytes(renderResult.blob.size)}</div>
+            <div><span className="block text-neutral-600">Quality</span>{renderResult.renderPresetLabel || `${renderResult.width}p`}</div>
             <div><span className="block text-neutral-600">Timing</span>{TIMING_SOURCE_LABELS[renderResult.timingSource] || renderResult.timingSource}</div>
           </div>
 

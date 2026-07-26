@@ -5,10 +5,56 @@
  * native browser APIs. Nothing is uploaded and the result is kept only in memory.
  */
 
-export const RENDER_WIDTH = 1280;
-export const RENDER_HEIGHT = 720;
-export const RENDER_FPS = 30;
+export const RENDER_PRESETS = Object.freeze({
+  mobile: Object.freeze({
+    id: "mobile",
+    label: "Mobile",
+    width: 854,
+    height: 480,
+    fps: 24,
+    videoBitsPerSecond: 1_800_000,
+    audioBitsPerSecond: 128_000,
+  }),
+  standard: Object.freeze({
+    id: "standard",
+    label: "Standard",
+    width: 1280,
+    height: 720,
+    fps: 24,
+    videoBitsPerSecond: 3_000_000,
+    audioBitsPerSecond: 128_000,
+  }),
+  high: Object.freeze({
+    id: "high",
+    label: "High",
+    width: 1280,
+    height: 720,
+    fps: 30,
+    videoBitsPerSecond: 4_000_000,
+    audioBitsPerSecond: 128_000,
+  }),
+});
+
+export const DEFAULT_RENDER_PRESET_ID = "standard";
+export const RENDER_WIDTH = RENDER_PRESETS.standard.width;
+export const RENDER_HEIGHT = RENDER_PRESETS.standard.height;
+export const RENDER_FPS = RENDER_PRESETS.standard.fps;
 export const CROSSFADE_SECONDS = 0.6;
+
+export function getRenderPreset(value = DEFAULT_RENDER_PRESET_ID) {
+  if (value && typeof value === "object" && value.id && RENDER_PRESETS[value.id]) {
+    return RENDER_PRESETS[value.id];
+  }
+  return RENDER_PRESETS[value] || RENDER_PRESETS[DEFAULT_RENDER_PRESET_ID];
+}
+
+export function estimateOutputBytes(audioDuration, value = DEFAULT_RENDER_PRESET_ID) {
+  if (!Number.isFinite(audioDuration) || audioDuration <= 0) return 0;
+  const preset = getRenderPreset(value);
+  const bitsPerSecond =
+    preset.videoBitsPerSecond + preset.audioBitsPerSecond;
+  return Math.ceil((bitsPerSecond * audioDuration * 1.08) / 8);
+}
 
 const IMAGE_LOAD_TIMEOUT_MS = 30_000;
 const RECORDER_STOP_TIMEOUT_MS = 5_000;
@@ -274,10 +320,12 @@ function createImage(imageSource, shouldCancel) {
   });
 }
 
-function coverGeometry(image, progress, motion) {
+function coverGeometry(image, progress, motion, renderConfig) {
+  const renderWidth = renderConfig.width;
+  const renderHeight = renderConfig.height;
   const baseScale = Math.max(
-    RENDER_WIDTH / image.naturalWidth,
-    RENDER_HEIGHT / image.naturalHeight
+    renderWidth / image.naturalWidth,
+    renderHeight / image.naturalHeight
   );
 
   let scaleMultiplier = 1.04;
@@ -293,15 +341,15 @@ function coverGeometry(image, progress, motion) {
       break;
     case "pan_left":
       scaleMultiplier = 1.12;
-      offsetX = (0.5 - progress) * RENDER_WIDTH * 0.08;
+      offsetX = (0.5 - progress) * renderWidth * 0.08;
       break;
     case "pan_right":
       scaleMultiplier = 1.12;
-      offsetX = (progress - 0.5) * RENDER_WIDTH * 0.08;
+      offsetX = (progress - 0.5) * renderWidth * 0.08;
       break;
     case "drift":
       scaleMultiplier = 1.09;
-      offsetY = Math.sin(progress * Math.PI * 2) * RENDER_HEIGHT * 0.025;
+      offsetY = Math.sin(progress * Math.PI * 2) * renderHeight * 0.025;
       break;
     case "shake": {
       scaleMultiplier = 1.09;
@@ -322,16 +370,16 @@ function coverGeometry(image, progress, motion) {
   const height = image.naturalHeight * scale;
 
   return {
-    x: (RENDER_WIDTH - width) / 2 + offsetX,
-    y: (RENDER_HEIGHT - height) / 2 + offsetY,
+    x: (renderWidth - width) / 2 + offsetX,
+    y: (renderHeight - height) / 2 + offsetY,
     width,
     height,
   };
 }
 
-function drawScene(ctx, image, progress, motion, alpha = 1) {
+function drawScene(ctx, image, progress, motion, renderConfig, alpha = 1) {
   const clampedProgress = Math.max(0, Math.min(1, progress));
-  const geometry = coverGeometry(image, clampedProgress, motion);
+  const geometry = coverGeometry(image, clampedProgress, motion, renderConfig);
   const localAlpha =
     motion === "fade" ? 0.82 + Math.sin(clampedProgress * Math.PI) * 0.18 : 1;
 
@@ -341,20 +389,22 @@ function drawScene(ctx, image, progress, motion, alpha = 1) {
   ctx.restore();
 }
 
-function drawVignette(ctx) {
+function drawVignette(ctx, renderConfig) {
+  const renderWidth = renderConfig.width;
+  const renderHeight = renderConfig.height;
   const gradient = ctx.createRadialGradient(
-    RENDER_WIDTH / 2,
-    RENDER_HEIGHT / 2,
-    RENDER_HEIGHT * 0.15,
-    RENDER_WIDTH / 2,
-    RENDER_HEIGHT / 2,
-    RENDER_WIDTH * 0.65
+    renderWidth / 2,
+    renderHeight / 2,
+    renderHeight * 0.15,
+    renderWidth / 2,
+    renderHeight / 2,
+    renderWidth * 0.65
   );
   gradient.addColorStop(0, "rgba(0,0,0,0)");
   gradient.addColorStop(0.72, "rgba(0,0,0,0.08)");
   gradient.addColorStop(1, "rgba(0,0,0,0.48)");
   ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, RENDER_WIDTH, RENDER_HEIGHT);
+  ctx.fillRect(0, 0, renderWidth, renderHeight);
 }
 
 function findSceneIndex(plan, elapsed) {
@@ -367,15 +417,15 @@ function smoothstep(value) {
   return clamped * clamped * (3 - 2 * clamped);
 }
 
-function drawTimelineFrame(ctx, plan, images, elapsed) {
+function drawTimelineFrame(ctx, plan, images, elapsed, renderConfig) {
   const sceneIndex = findSceneIndex(plan, elapsed);
   const scene = plan[sceneIndex];
   const sceneElapsed = Math.max(0, elapsed - scene.start);
   const sceneProgress = Math.min(1, sceneElapsed / scene.duration);
 
   ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, RENDER_WIDTH, RENDER_HEIGHT);
-  drawScene(ctx, images[sceneIndex], sceneProgress, scene.motion, 1);
+  ctx.fillRect(0, 0, renderConfig.width, renderConfig.height);
+  drawScene(ctx, images[sceneIndex], sceneProgress, scene.motion, renderConfig, 1);
 
   if (sceneIndex < plan.length - 1) {
     const nextScene = plan[sceneIndex + 1];
@@ -388,15 +438,18 @@ function drawTimelineFrame(ctx, plan, images, elapsed) {
 
     if (fadeDuration > 0 && timeToEnd < fadeDuration) {
       const fadeProgress = smoothstep(1 - timeToEnd / fadeDuration);
-
-      // Keep the incoming scene at motion progress 0 while it fades in. When its
-      // official timeline begins it also starts at 0, so there is no motion reset.
-      // Drawing it over a fully opaque outgoing scene avoids the old dark dip.
-      drawScene(ctx, images[sceneIndex + 1], 0, nextScene.motion, fadeProgress);
+      drawScene(
+        ctx,
+        images[sceneIndex + 1],
+        0,
+        nextScene.motion,
+        renderConfig,
+        fadeProgress
+      );
     }
   }
 
-  drawVignette(ctx);
+  drawVignette(ctx, renderConfig);
   return sceneIndex;
 }
 
@@ -410,12 +463,12 @@ function reportProgress(onProgress, stage, percent, details = {}) {
   }
 }
 
-function createMediaRecorder(stream, preferredMimeType) {
+function createMediaRecorder(stream, preferredMimeType, renderConfig) {
   const optionSets = [
     {
       mimeType: preferredMimeType,
-      videoBitsPerSecond: 4_000_000,
-      audioBitsPerSecond: 128_000,
+      videoBitsPerSecond: renderConfig.videoBitsPerSecond,
+      audioBitsPerSecond: renderConfig.audioBitsPerSecond,
     },
     { mimeType: preferredMimeType },
     undefined,
@@ -443,6 +496,7 @@ export async function renderVideo({
   audioFile,
   scenes,
   projectTitle,
+  renderPreset = DEFAULT_RENDER_PRESET_ID,
   onProgress,
   shouldCancel,
 }) {
@@ -461,6 +515,17 @@ export async function renderVideo({
     throw new Error("No approved scene images are available for rendering.");
   }
 
+  const invalidScene = scenes.find(
+    (scene) => !scene?.approved || !scene?.imageDataUrl
+  );
+  if (invalidScene) {
+    throw new Error(
+      `Scene ${invalidScene.scene_number || "unknown"} needs an approved image before export.`
+    );
+  }
+
+  const renderConfig = getRenderPreset(renderPreset);
+
   let animationFrameId = 0;
   let audioContext = null;
   let audioSource = null;
@@ -471,6 +536,7 @@ export async function renderVideo({
   let recorderStopped = Promise.resolve();
   let recorderError = null;
   let cancelled = false;
+  let renderSafetyTimeoutId = 0;
 
   const isCancelled = () => cancelled || Boolean(shouldCancel?.());
 
@@ -487,6 +553,13 @@ export async function renderVideo({
     if (animationFrameId) {
       cancelAnimationFrame(animationFrameId);
       animationFrameId = 0;
+    }
+    if (renderSafetyTimeoutId) {
+      window.clearTimeout(renderSafetyTimeoutId);
+      renderSafetyTimeoutId = 0;
+    }
+    if (audioSource) {
+      audioSource.onended = null;
     }
 
     try {
@@ -571,13 +644,13 @@ export async function renderVideo({
     }
 
     const canvas = document.createElement("canvas");
-    canvas.width = RENDER_WIDTH;
-    canvas.height = RENDER_HEIGHT;
+    canvas.width = renderConfig.width;
+    canvas.height = renderConfig.height;
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) throw new Error("The browser could not create a video canvas.");
 
-    drawTimelineFrame(ctx, plan, loadedImages, 0);
-    canvasStream = canvas.captureStream(RENDER_FPS);
+    drawTimelineFrame(ctx, plan, loadedImages, 0, renderConfig);
+    canvasStream = canvas.captureStream(renderConfig.fps);
 
     audioDestination = audioContext.createMediaStreamDestination();
     audioSource = audioContext.createBufferSource();
@@ -590,7 +663,7 @@ export async function renderVideo({
     ]);
 
     const chunks = [];
-    recorder = createMediaRecorder(combinedStream, support.mimeType);
+    recorder = createMediaRecorder(combinedStream, support.mimeType, renderConfig);
     recorderStopped = new Promise((resolve) => {
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) chunks.push(event.data);
@@ -609,14 +682,43 @@ export async function renderVideo({
     });
 
     recorder.start(1000);
-    const audioStartedAt = audioContext.currentTime;
-    audioSource.start(audioStartedAt);
-
+    let audioStartedAt = 0;
     let lastReportedPercent = -1;
     let lastReportedScene = -1;
 
     await new Promise((resolve, reject) => {
+      let settled = false;
+
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        if (renderSafetyTimeoutId) {
+          window.clearTimeout(renderSafetyTimeoutId);
+          renderSafetyTimeoutId = 0;
+        }
+        audioSource.onended = null;
+        callback(value);
+      };
+
+      const drawFinalFrameAndStop = () => {
+        drawTimelineFrame(ctx, plan, loadedImages, duration, renderConfig);
+        requestRecorderStop();
+        finish(resolve);
+      };
+
+      audioSource.onended = () => {
+        if (isCancelled()) {
+          cancelled = true;
+          requestRecorderStop();
+          finish(reject, new VideoRenderCancelledError());
+          return;
+        }
+        drawFinalFrameAndStop();
+      };
+
       const drawFrame = () => {
+        if (settled) return;
+
         if (isCancelled()) {
           cancelled = true;
           requestRecorderStop();
@@ -625,17 +727,20 @@ export async function renderVideo({
           } catch {
             // Ignore audio stop errors while cancelling.
           }
-          reject(new VideoRenderCancelledError());
+          finish(reject, new VideoRenderCancelledError());
           return;
         }
 
         if (recorderError) {
-          reject(recorderError);
+          finish(reject, recorderError);
           return;
         }
 
         if (recorder.state === "inactive") {
-          reject(new Error("The browser video recorder stopped before the song finished."));
+          finish(
+            reject,
+            new Error("The browser video recorder stopped before the song finished.")
+          );
           return;
         }
 
@@ -643,7 +748,13 @@ export async function renderVideo({
           Math.max(0, audioContext.currentTime - audioStartedAt),
           duration
         );
-        const sceneIndex = drawTimelineFrame(ctx, plan, loadedImages, elapsed);
+        const sceneIndex = drawTimelineFrame(
+          ctx,
+          plan,
+          loadedImages,
+          elapsed,
+          renderConfig
+        );
         const percent = Math.round(20 + (elapsed / duration) * 75);
 
         if (percent !== lastReportedPercent || sceneIndex !== lastReportedScene) {
@@ -655,15 +766,21 @@ export async function renderVideo({
           });
         }
 
-        if (elapsed >= duration) {
-          requestRecorderStop();
-          resolve();
-          return;
-        }
-
+        // Once the audio clock reaches the end, keep drawing the exact final
+        // frame until AudioBufferSourceNode.onended stops the recorder.
         animationFrameId = requestAnimationFrame(drawFrame);
       };
 
+      renderSafetyTimeoutId = window.setTimeout(() => {
+        requestRecorderStop();
+        finish(
+          reject,
+          new Error("Video rendering did not stop after the song ended.")
+        );
+      }, Math.ceil((duration + 15) * 1000));
+
+      audioStartedAt = audioContext.currentTime;
+      audioSource.start(audioStartedAt);
       animationFrameId = requestAnimationFrame(drawFrame);
     });
 
@@ -702,9 +819,11 @@ export async function renderVideo({
       duration,
       sceneCount: plan.length,
       timingSource,
-      width: RENDER_WIDTH,
-      height: RENDER_HEIGHT,
-      fps: RENDER_FPS,
+      width: renderConfig.width,
+      height: renderConfig.height,
+      fps: renderConfig.fps,
+      renderPresetId: renderConfig.id,
+      renderPresetLabel: renderConfig.label,
     };
   } catch (error) {
     if (error instanceof VideoRenderCancelledError || isCancelled()) {
