@@ -77,3 +77,51 @@ describe("BeatVision render timing", () => {
     expect(sanitizeProjectTitle(" My / Song?! ")).toBe("My-Song");
   });
 });
+
+
+describe("BeatVision segmented render planning", () => {
+  const {
+    RENDER_SEGMENT_SECONDS,
+    SEGMENTED_RENDER_THRESHOLD_SECONDS,
+    buildRenderSegments,
+    shouldUseSegmentedRender,
+  } = require("./segmentedVideoRenderer");
+
+  test("uses 45-second internal work batches", () => {
+    expect(RENDER_SEGMENT_SECONDS).toBe(45);
+    const segments = buildRenderSegments(300);
+    expect(segments).toHaveLength(7);
+    expect(segments[0]).toMatchObject({ start: 0, end: 45, duration: 45 });
+    expect(segments[6]).toMatchObject({ start: 270, end: 300, duration: 30 });
+  });
+
+  test("keeps segments continuous and within the maximum duration", () => {
+    const segments = buildRenderSegments(300.8);
+    for (let index = 0; index < segments.length; index += 1) {
+      expect(segments[index].duration).toBeGreaterThan(0);
+      expect(segments[index].duration).toBeLessThanOrEqual(45);
+      if (index > 0) {
+        expect(segments[index].start).toBeCloseTo(
+          segments[index - 1].end,
+          8
+        );
+      }
+    }
+    expect(segments[segments.length - 1].end).toBeCloseTo(300.8, 8);
+  });
+
+  test("keeps short songs on the single-pass renderer", () => {
+    expect(SEGMENTED_RENDER_THRESHOLD_SECONDS).toBe(50);
+    expect(shouldUseSegmentedRender(50)).toBe(false);
+    expect(shouldUseSegmentedRender(50.001)).toBe(true);
+  });
+
+  test("rejects invalid segment input", () => {
+    expect(() => buildRenderSegments(0)).toThrow(
+      "A positive render duration is required."
+    );
+    expect(() => buildRenderSegments(20, 0)).toThrow(
+      "A positive segment duration is required."
+    );
+  });
+});

@@ -1,3 +1,12 @@
+import {
+  SEGMENTED_RENDER_CANCELLED_CODE,
+  SEGMENTED_RENDER_THRESHOLD_SECONDS,
+  SEGMENTED_RENDER_UNSUPPORTED_CODE,
+  getSegmentedRenderSupport,
+  renderSegmentedWebM,
+  shouldUseSegmentedRender,
+} from "./segmentedVideoRenderer";
+
 /*
  * BeatVision browser video renderer.
  *
@@ -81,61 +90,65 @@ export function getVideoRenderSupport() {
       supported: false,
       mimeType: "",
       reason: "Video rendering requires a browser.",
+      segmentedSupported: false,
+      legacySupported: false,
     };
   }
 
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  const canvas = document.createElement("canvas");
-
-  if (typeof canvas.captureStream !== "function") {
-    return {
-      supported: false,
-      mimeType: "",
-      reason: "Canvas video capture is not supported.",
-    };
-  }
-
-  if (typeof window.MediaRecorder !== "function") {
-    return {
-      supported: false,
-      mimeType: "",
-      reason: "MediaRecorder is not supported.",
-    };
-  }
-
-  if (typeof window.MediaStream !== "function") {
-    return {
-      supported: false,
-      mimeType: "",
-      reason: "MediaStream is not supported.",
-    };
-  }
-
   if (!AudioContextClass) {
     return {
       supported: false,
       mimeType: "",
       reason: "Web Audio is not supported.",
+      segmentedSupported: false,
+      legacySupported: false,
     };
   }
 
-  const mimeType = MIME_CANDIDATES.find((candidate) => {
-    try {
-      return window.MediaRecorder.isTypeSupported(candidate);
-    } catch {
-      return false;
-    }
-  });
+  const segmentedSupport = getSegmentedRenderSupport();
+  const canvas = document.createElement("canvas");
+  const captureSupported = typeof canvas.captureStream === "function";
+  const mediaRecorderSupported =
+    typeof window.MediaRecorder === "function";
+  const mediaStreamSupported = typeof window.MediaStream === "function";
 
-  if (!mimeType) {
+  const mimeType =
+    mediaRecorderSupported &&
+    MIME_CANDIDATES.find((candidate) => {
+      try {
+        return window.MediaRecorder.isTypeSupported(candidate);
+      } catch {
+        return false;
+      }
+    });
+
+  const legacySupported = Boolean(
+    captureSupported &&
+      mediaRecorderSupported &&
+      mediaStreamSupported &&
+      mimeType
+  );
+
+  if (!segmentedSupport.supported && !legacySupported) {
     return {
       supported: false,
       mimeType: "",
-      reason: "No supported WebM recording codec was found.",
+      reason:
+        segmentedSupport.reason ||
+        "No supported local WebM export engine was found.",
+      segmentedSupported: false,
+      legacySupported: false,
     };
   }
 
-  return { supported: true, mimeType, reason: "" };
+  return {
+    supported: true,
+    mimeType: mimeType || "video/webm",
+    reason: "",
+    segmentedSupported: segmentedSupport.supported,
+    legacySupported,
+  };
 }
 
 function parseClockValue(value) {
@@ -650,6 +663,89 @@ export async function renderVideo({
     if (!ctx) throw new Error("The browser could not create a video canvas.");
 
     drawTimelineFrame(ctx, plan, loadedImages, 0, renderConfig);
+
+    const segmentedSupport = getSegmentedRenderSupport();
+    const attemptSegmented =
+      segmentedSupport.supported &&
+      (shouldUseSegmentedRender(duration) || !support.legacySupported);
+
+    if (attemptSegmented) {
+      try {
+        const segmentedResult = await renderSegmentedWebM({
+          canvas,
+          audioContext,
+          audioBuffer,
+          duration,
+          renderConfig,
+          drawFrame: (timestamp) =>
+            drawTimelineFrame(
+              ctx,
+              plan,
+              loadedImages,
+              timestamp,
+              renderConfig
+            ),
+          shouldCancel: isCancelled,
+          onProgress: (nextProgress) => {
+            const timestamp = Number.isFinite(nextProgress.timestamp)
+              ? nextProgress.timestamp
+              : 0;
+            const sceneIndex = findSceneIndex(plan, timestamp);
+            reportProgress(
+              onProgress,
+              nextProgress.stage,
+              nextProgress.percent,
+              {
+                ...nextProgress,
+                scene: sceneIndex + 1,
+                totalScenes: plan.length,
+              }
+            );
+          },
+        });
+
+        if (isCancelled()) throw new VideoRenderCancelledError();
+
+        return {
+          ...segmentedResult,
+          filename: `BeatVision-${sanitizeProjectTitle(projectTitle)}.webm`,
+          duration,
+          sceneCount: plan.length,
+          timingSource,
+          width: renderConfig.width,
+          height: renderConfig.height,
+          fps: renderConfig.fps,
+          renderPresetId: renderConfig.id,
+          renderPresetLabel: renderConfig.label,
+        };
+      } catch (error) {
+        if (
+          error?.code === SEGMENTED_RENDER_CANCELLED_CODE ||
+          isCancelled()
+        ) {
+          throw new VideoRenderCancelledError();
+        }
+
+        if (
+          error?.code === SEGMENTED_RENDER_UNSUPPORTED_CODE &&
+          support.legacySupported
+        ) {
+          reportProgress(onProgress, "fallback", 20, {
+            scene: 1,
+            totalScenes: plan.length,
+          });
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    if (!support.legacySupported) {
+      throw new Error(
+        "This browser cannot use the single-pass WebM fallback."
+      );
+    }
+
     canvasStream = canvas.captureStream(renderConfig.fps);
 
     audioDestination = audioContext.createMediaStreamDestination();
@@ -824,6 +920,11 @@ export async function renderVideo({
       fps: renderConfig.fps,
       renderPresetId: renderConfig.id,
       renderPresetLabel: renderConfig.label,
+      renderMode:
+        duration > SEGMENTED_RENDER_THRESHOLD_SECONDS
+          ? "single_pass_fallback"
+          : "single_pass",
+      segmentCount: 1,
     };
   } catch (error) {
     if (error instanceof VideoRenderCancelledError || isCancelled()) {

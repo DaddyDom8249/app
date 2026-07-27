@@ -25,6 +25,10 @@ import {
   renderVideo,
   VideoRenderCancelledError,
 } from "@/lib/videoRenderer";
+import {
+  SEGMENTED_RENDER_THRESHOLD_SECONDS,
+  buildRenderSegments,
+} from "@/lib/segmentedVideoRenderer";
 
 const TIMING_SOURCE_LABELS = {
   storyboard: "Storyboard timing",
@@ -35,6 +39,11 @@ const TIMING_SOURCE_LABELS = {
 const PROGRESS_LABELS = {
   preparing_audio: "Preparing audio",
   loading_images: "Loading scene images",
+  preparing_encoder: "Preparing fixed-frame encoder",
+  encoding_audio: "Encoding audio segment",
+  rendering_segmented: "Rendering fixed video frames",
+  muxing: "Muxing final WebM",
+  fallback: "Using single-pass compatibility mode",
   rendering: "Rendering scenes",
   finalizing: "Finalizing video",
   complete: "Complete",
@@ -160,6 +169,17 @@ export default function MotionExportPanel({
     if (typeof navigator === "undefined") return false;
     return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "");
   }, []);
+  const usesSegmentedStrategy =
+    Number.isFinite(audioDuration) &&
+    audioDuration > SEGMENTED_RENDER_THRESHOLD_SECONDS;
+  const expectedSegmentCount = useMemo(() => {
+    if (!usesSegmentedStrategy) return 1;
+    try {
+      return buildRenderSegments(audioDuration).length;
+    } catch {
+      return 1;
+    }
+  }, [audioDuration, usesSegmentedStrategy]);
 
   const scenes = useMemo(() => {
     return [...(project.storyboardScenes || [])]
@@ -443,6 +463,25 @@ export default function MotionExportPanel({
       </div>
 
       <div className="bv-card p-5">
+        <div className="overline text-neutral-500">Render strategy</div>
+        <div className="font-display text-xl mt-1">
+          {usesSegmentedStrategy
+            ? "Segmented fixed-frame WebM"
+            : "Single-pass WebM"}
+        </div>
+        <p className="font-body text-sm text-neutral-400 mt-2">
+          {usesSegmentedStrategy
+            ? `This ${formatSeconds(audioDuration)} song will be encoded in ${expectedSegmentCount} internal 45-second work batches and written into one properly muxed WebM file.`
+            : "Songs up to 50 seconds use the existing single-pass renderer."}
+        </p>
+        {usesSegmentedStrategy && (
+          <div className="mt-3 text-xs font-mono text-[#34D399]">
+            Fixed timestamps prevent the multi-second frame gaps seen in long mobile MediaRecorder exports.
+          </div>
+        )}
+      </div>
+
+      <div className="bv-card p-5">
         <div className="overline text-neutral-500 mb-4">Export requirements</div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <Requirement ok={requirements.hasScenes}>Storyboard scenes are available.</Requirement>
@@ -451,7 +490,7 @@ export default function MotionExportPanel({
           </Requirement>
           <Requirement ok={requirements.hasAudio}>The original song is selected.</Requirement>
           <Requirement ok={requirements.browserSupported}>
-            Browser supports Canvas capture, Web Audio, MediaRecorder, and WebM.
+            Browser supports local WebM export.
           </Requirement>
         </div>
 
@@ -526,6 +565,11 @@ export default function MotionExportPanel({
                     Scene {progress.scene} of {progress.totalScenes}
                   </div>
                 )}
+                {progress.segment && progress.totalSegments && (
+                  <div className="font-mono text-xs text-neutral-500 mt-1">
+                    Work batch {progress.segment} of {progress.totalSegments}
+                  </div>
+                )}
               </div>
             </div>
             <div className="font-display text-2xl">{progress.percent || 0}%</div>
@@ -556,7 +600,10 @@ export default function MotionExportPanel({
           disabled={!canRender}
           data-testid="render-full-video"
         >
-          <Film className="w-4 h-4" /> Render full video
+          <Film className="w-4 h-4" />{" "}
+          {usesSegmentedStrategy
+            ? "Render segmented video"
+            : "Render full video"}
         </button>
       )}
 
@@ -578,11 +625,12 @@ export default function MotionExportPanel({
             data-testid="generated-video-preview"
           />
 
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs font-mono text-neutral-400">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3 text-xs font-mono text-neutral-400">
             <div><span className="block text-neutral-600">Duration</span>{formatSeconds(renderResult.duration)}</div>
             <div><span className="block text-neutral-600">Scenes</span>{renderResult.sceneCount}</div>
             <div><span className="block text-neutral-600">Size</span>{formatBytes(renderResult.blob.size)}</div>
             <div><span className="block text-neutral-600">Quality</span>{renderResult.renderPresetLabel || `${renderResult.width}p`}</div>
+            <div><span className="block text-neutral-600">Mode</span>{renderResult.renderMode === "segmented_webcodecs" ? `Segmented (${renderResult.segmentCount})` : "Single pass"}</div>
             <div><span className="block text-neutral-600">Timing</span>{TIMING_SOURCE_LABELS[renderResult.timingSource] || renderResult.timingSource}</div>
           </div>
 
