@@ -1,6 +1,12 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getProject, upsertProject, fileToDataUrl, StorageQuotaError } from "@/lib/storage";
+import {
+  getProjectDurable,
+  upsertProjectDurable,
+  fileToDataUrl,
+  StorageQuotaError,
+} from "@/lib/storage";
+import { DurableImageStorageError } from "@/lib/imageStorage";
 import { styleLabel, refTypeLabel, REFERENCE_TYPES } from "@/lib/constants";
 import {
   generateWorldReport,
@@ -119,51 +125,90 @@ export default function ProjectWorkflow() {
   const [loading, setLoading] = useState({});
   const [providerStatus, setProviderStatus] = useState(null);
   const projectRef = useRef(null);
+  const saveQueueRef = useRef(Promise.resolve());
 
   useEffect(() => {
-    const p = getProject(id);
-    if (!p) {
-      toast.error("Project not found");
-      nav("/dashboard");
-      return;
+    let active = true;
+
+    async function loadProject() {
+      try {
+        const loadedProject = await getProjectDurable(id);
+        if (!active) return;
+
+        if (!loadedProject) {
+          toast.error("Project not found");
+          nav("/dashboard");
+          return;
+        }
+
+        projectRef.current = loadedProject;
+        setProject(loadedProject);
+      } catch (error) {
+        console.error("Project image hydration failed", error);
+        if (!active) return;
+        toast.error(
+          "BeatVision could not load this project's saved image data."
+        );
+      }
     }
-    projectRef.current = p;
-    setProject(p);
+
+    loadProject();
     fetchProviderStatus()
-      .then(setProviderStatus)
-      .catch(() => setProviderStatus(null));
+      .then((status) => {
+        if (active) setProviderStatus(status);
+      })
+      .catch(() => {
+        if (active) setProviderStatus(null);
+      });
+
+    return () => {
+      active = false;
+    };
   }, [id, nav]);
 
   function persist(patch) {
     const current = projectRef.current || project;
-    if (!current) return;
+    if (!current) return Promise.resolve(false);
 
     const next = { ...current, ...patch };
 
     projectRef.current = next;
     setProject(next);
 
-    try {
-      upsertProject(next);
-    } catch (error) {
-      console.error("Project persistence failed", error);
+    const saveTask = saveQueueRef.current.then(() =>
+      upsertProjectDurable(next)
+    );
 
-      if (
-        error instanceof StorageQuotaError ||
-        error?.code === "BEATVISION_STORAGE_QUOTA"
-      ) {
-        toast.error(
-          "Browser storage is full. Remove large reference or scene images before adding more."
-        );
-        toast.warning(
-          "The latest change is visible now, but it may not survive a page refresh."
-        );
-      } else {
-        toast.error(
-          "The latest project change could not be saved to browser storage."
-        );
-      }
-    }
+    const handledTask = saveTask
+      .then(() => true)
+      .catch((error) => {
+        console.error("Project persistence failed", error);
+
+        if (
+          error instanceof StorageQuotaError ||
+          error?.code === "BEATVISION_STORAGE_QUOTA"
+        ) {
+          toast.error(
+            "Device browser storage is full. Remove unused BeatVision images or projects."
+          );
+        } else if (
+          error instanceof DurableImageStorageError ||
+          error?.code === "BEATVISION_IMAGE_STORAGE_UNAVAILABLE"
+        ) {
+          toast.error(
+            "Durable image storage is unavailable. Keep this tab open until the storage problem is fixed."
+          );
+        } else {
+          toast.error(
+            "The latest project change could not be saved to browser storage."
+          );
+        }
+
+        return false;
+      });
+
+    saveQueueRef.current = handledTask.then(() => undefined);
+    return handledTask;
   }
 
   function setLoad(k, v) {
@@ -429,8 +474,10 @@ export default function ProjectWorkflow() {
           data.referenceMode ||
           "direct_reference_images",
       };
-      persist({ sceneImages });
-      toast.success(`Scene ${sceneNumber} image generated`);
+      const saved = await persist({ sceneImages });
+      if (saved) {
+        toast.success(`Scene ${sceneNumber} image generated and saved`);
+      }
     } catch (e) {
       const status = e.response?.status;
 
@@ -463,7 +510,9 @@ export default function ProjectWorkflow() {
   async function handleManualUpload(sceneNumber, file) {
     if (!file) return;
     if (file.size > 4.5 * 1024 * 1024) {
-      toast.warning("Large image may not persist across sessions.");
+      toast.warning(
+        "Large image will use significant on-device browser storage."
+      );
     }
     try {
       const dataUrl = await fileToDataUrl(file);
@@ -476,8 +525,10 @@ export default function ProjectWorkflow() {
         generatedAt: new Date().toISOString(),
         referencePhotoIdsUsed: [],
       };
-      persist({ sceneImages });
-      toast.success(`Uploaded scene ${sceneNumber} image`);
+      const saved = await persist({ sceneImages });
+      if (saved) {
+        toast.success(`Uploaded scene ${sceneNumber} image and saved it`);
+      }
     } catch (e) {
       toast.error("Failed to read image");
     }
@@ -550,7 +601,7 @@ export default function ProjectWorkflow() {
           testidPrefix="workflow-ref"
         />
         <div className="mt-4 text-xs text-neutral-500 font-mono">
-          Note: Large uploaded photos may only persist during this browser session in the MVP.
+          Reference photos and generated scene images are stored on this device for future sessions.
         </div>
       </Section>
 

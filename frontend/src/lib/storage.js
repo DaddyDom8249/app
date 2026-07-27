@@ -1,3 +1,9 @@
+import {
+  deleteProjectImages,
+  hydrateProjectImages,
+  persistProjectImages,
+} from "./imageStorage";
+
 const KEY = "beatvision.projects.v1";
 
 function isObject(value) {
@@ -113,6 +119,21 @@ export function getProject(id) {
   return loadProjects().find((project) => project.id === id) || null;
 }
 
+export async function getProjectDurable(id) {
+  const project = getProject(id);
+  if (!project) return null;
+
+  const metadataProject = await persistProjectImages(project);
+  const savedProject = upsertProject(metadataProject);
+
+  try {
+    return await hydrateProjectImages(savedProject);
+  } catch (error) {
+    console.error("Project image hydration failed", error);
+    return savedProject;
+  }
+}
+
 export function upsertProject(project) {
   const now = new Date().toISOString();
   const projects = loadProjects();
@@ -137,11 +158,22 @@ export function upsertProject(project) {
   return next;
 }
 
+export async function upsertProjectDurable(project) {
+  const metadataProject = await persistProjectImages(project);
+  return upsertProject(metadataProject);
+}
+
 export function deleteProject(id) {
   const projects = loadProjects().filter(
     (project) => project.id !== id
   );
-  return saveProjects(projects);
+  const saved = saveProjects(projects);
+
+  deleteProjectImages(id).catch((error) => {
+    console.error("Project image cleanup failed", error);
+  });
+
+  return saved;
 }
 
 export function newProject(fields) {
